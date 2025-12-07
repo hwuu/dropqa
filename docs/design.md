@@ -11,7 +11,8 @@
 - [4. 数据结构设计](#4-数据结构设计)
   - [4.1 数据库表设计](#41-数据库表设计)
   - [4.2 向量索引设计](#42-向量索引设计)
-  - [4.3 层级节点结构](#43-层级节点结构)
+  - [4.3 全文搜索索引设计](#43-全文搜索索引设计)
+  - [4.4 层级节点结构](#44-层级节点结构)
 - [5. 核心算法设计](#5-核心算法设计)
   - [5.1 文档解析流程](#51-文档解析流程)
   - [5.2 层级索引构建](#52-层级索引构建)
@@ -131,12 +132,26 @@
 | **前端** | Vue 3 + TailwindCSS | 现代美观，组件化开发 |
 | **后端** | FastAPI | 高性能，异步支持好 |
 | **索引框架** | LlamaIndex | 层级索引、文档管理支持好 |
-| **向量数据库** | PostgreSQL + pgvector | 成熟稳定，元数据与向量统一存储 |
+| **数据库** | PostgreSQL | 成熟稳定，支持多种索引类型 |
+| **全文搜索** | PostgreSQL tsvector + GIN | 内置 BM25 风格的全文检索 |
+| **向量搜索** | PostgreSQL + pgvector | 语义搜索，可选启用 |
 | **文档解析** | unstructured | 统一多格式解析接口 |
 | **OCR** | PaddleOCR | 中文 OCR 效果好 |
 | **多模态** | OpenAI Vision API 或兼容接口 | 图片理解 |
-| **嵌入模型** | OpenAI API 格式 | 可接本地或云端 |
+| **嵌入模型** | OpenAI API 格式 | 可接本地或云端，语义搜索时使用 |
 | **LLM** | OpenAI API 格式 | 可接本地或云端 |
+
+**搜索策略说明**：
+
+系统支持三种搜索方式，Agent 根据问题特征自动选择：
+
+| 搜索方式 | 实现技术 | 适用场景 |
+|---------|---------|---------|
+| 关键词搜索 | PostgreSQL LIKE / 正则 | 精确名称、数字、专有名词 |
+| 全文搜索 | PostgreSQL tsvector + GIN (BM25) | 多关键词、主题查找 |
+| 语义搜索 | pgvector 向量检索 | 模糊表述、同义词、概念性问题 |
+
+向量搜索不是必须的——对于小数据量且关键词明确的场景，关键词/全文搜索更快更准确。
 
 ### 3.3 模块划分
 
@@ -290,9 +305,83 @@ CREATE INDEX ON embeddings USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX ON embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 ```
 
-### 4.3 层级节点结构
+**注意**：向量索引是可选的。对于小数据量场景，可以先不启用语义搜索，仅使用关键词/全文搜索。
 
-#### 4.3.1 自适应层级设计
+### 4.3 全文搜索索引设计
+
+使用 PostgreSQL 内置的全文搜索功能，支持 BM25 风格的文本检索：
+
+```sql
+-- 在 nodes 表添加全文搜索向量列
+ALTER TABLE nodes ADD COLUMN search_vector tsvector;
+
+-- 创建触发器自动更新搜索向量
+CREATE OR REPLACE FUNCTION update_search_vector()
+RETURNS trigger AS $$
+BEGIN
+    NEW.search_vector :=
+        setweight(to_tsvector('chinese', COALESCE(NEW.title, '')), 'A') ||
+        setweight(to_tsvector('chinese', COALESCE(NEW.content, '')), 'B') ||
+        setweight(to_tsvector('chinese', COALESCE(NEW.summary, '')), 'C');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER nodes_search_vector_update
+    BEFORE INSERT OR UPDATE ON nodes
+    FOR EACH ROW EXECUTE FUNCTION update_search_vector();
+
+-- 创建 GIN 索引加速全文搜索
+CREATE INDEX nodes_search_idx ON nodes USING gin(search_vector);
+```
+
+#### 全文搜索查询示例
+
+```sql
+-- 基本全文搜索
+SELECT id, title, content,
+       ts_rank(search_vector, query) AS rank
+FROM nodes,
+     to_tsquery('chinese', '项目 & 预算') AS query
+WHERE search_vector @@ query
+ORDER BY rank DESC
+LIMIT 10;
+
+-- 带权重的搜索（标题匹配权重更高）
+SELECT id, title, content,
+       ts_rank_cd(search_vector, query, 32) AS rank
+FROM nodes,
+     plainto_tsquery('chinese', '系统架构设计') AS query
+WHERE search_vector @@ query
+ORDER BY rank DESC;
+```
+
+#### 中文分词配置
+
+PostgreSQL 默认不支持中文分词，需要安装扩展：
+
+```sql
+-- 方式1：使用 pg_jieba（推荐）
+CREATE EXTENSION pg_jieba;
+
+-- 方式2：使用 zhparser
+CREATE EXTENSION zhparser;
+CREATE TEXT SEARCH CONFIGURATION chinese (PARSER = zhparser);
+ALTER TEXT SEARCH CONFIGURATION chinese
+    ADD MAPPING FOR n,v,a,i,e,l WITH simple;
+```
+
+#### 三种搜索方式对比
+
+| 搜索方式 | 索引类型 | 查询复杂度 | 适用场景 |
+|---------|---------|-----------|---------|
+| 关键词搜索 | 无/B-tree | O(n) 或 O(log n) | 精确匹配少量关键词 |
+| 全文搜索 | GIN (tsvector) | O(log n) | 多词匹配、主题搜索 |
+| 语义搜索 | HNSW/IVFFlat | O(log n) | 模糊语义、同义词 |
+
+### 4.4 层级节点结构
+
+#### 4.4.1 自适应层级设计
 
 文档解析后形成**自适应深度**的树状结构，使用 `depth` 字段标识层级，不限制最大层数：
 
@@ -315,7 +404,7 @@ Document (depth=0)
 - **depth 自适应**：根据文档实际标题层级确定，无硬性上限
 - **每个 section 有 summary**：入库时用 LLM 自动生成
 
-#### 4.3.2 上下文增强（Breadcrumb + Summary）
+#### 4.4.2 上下文增强（Breadcrumb + Summary）
 
 检索到 paragraph 时，向上收集所有祖先节点的标题和摘要：
 
@@ -343,7 +432,7 @@ Document (depth=0)
 }
 ```
 
-#### 4.3.3 检索策略
+#### 4.4.3 检索策略
 
 - **检索单位**：仅检索 paragraph 节点（叶子节点）
 - **上下文增强**：递归收集祖先路径的 title + summary
@@ -901,11 +990,19 @@ WHERE n.document_id = :doc_id
 Agent 工具体系
 ├── 上下文增强工具（Context Enhancement）
 │   │  目的：获取更多相关信息，扩充上下文
-│   ├── search_documents      # 语义检索文档
-│   ├── get_node_content      # 获取节点完整内容
-│   ├── get_section_children  # 浏览章节子节点
-│   ├── get_document_structure# 获取文档结构树
-│   └── get_related_documents # 获取相关文档
+│   │
+│   ├── 搜索工具（三种策略）
+│   │   ├── keyword_search       # 关键词/正则精确搜索
+│   │   ├── fulltext_search      # BM25 全文搜索
+│   │   └── semantic_search      # 语义向量搜索
+│   │
+│   ├── 浏览工具
+│   │   ├── get_node_content     # 获取节点完整内容
+│   │   ├── get_section_children # 浏览章节子节点
+│   │   └── get_document_structure # 获取文档结构树
+│   │
+│   └── 关联工具
+│       └── get_related_documents # 获取相关文档
 │
 ├── 分析工具（Analysis）
 │   │  目的：处理已有信息，提升质量
@@ -917,22 +1014,144 @@ Agent 工具体系
     └── search_web            # 外部搜索（未来）
 ```
 
-#### 6.2.2 上下文增强工具
+#### 6.2.2 搜索工具详解
 
-这类工具的目的是**扩充和丰富上下文**，为 LLM 提供更多决策依据：
+**核心理念**：RAG 的本质是"先找后读"，搜索手段可以多样化。向量检索不是唯一选择，应根据问题特征选择最合适的搜索策略。
 
 ```python
-context_tools = [
+search_tools = [
     {
-        "name": "search_documents",
+        "name": "keyword_search",
         "category": "context_enhancement",
-        "description": "Search internal documents by semantic similarity. Use when you need to find information on a specific topic.",
+        "description": "Search by exact keywords or regex patterns. Best for queries containing specific names, numbers, or technical terms.",
         "parameters": {
-            "query": {"type": "string", "description": "Search query"},
-            "top_k": {"type": "integer", "default": 5, "description": "Number of results"}
+            "keywords": {"type": "array", "description": "List of keywords to search"},
+            "mode": {"type": "string", "enum": ["exact", "regex", "fuzzy"], "default": "exact"},
+            "case_sensitive": {"type": "boolean", "default": False}
         },
-        "returns": "List of relevant document paragraphs with metadata"
+        "returns": "List of matching paragraphs with line numbers and context",
+        "when_to_use": [
+            "Query contains person names, project names, or specific terms",
+            "Query contains numbers (dates, amounts, versions)",
+            "Query asks for exact definitions or specifications"
+        ],
+        "examples": [
+            "张三负责哪些项目 → keywords: ['张三']",
+            "2024年的预算是多少 → keywords: ['2024', '预算']",
+            "API 接口的定义 → keywords: ['API', '接口'], mode: regex"
+        ]
     },
+    {
+        "name": "fulltext_search",
+        "category": "context_enhancement",
+        "description": "BM25-based full-text search. Good balance between precision and recall, handles multiple keywords well.",
+        "parameters": {
+            "query": {"type": "string", "description": "Search query with multiple terms"},
+            "top_k": {"type": "integer", "default": 10}
+        },
+        "returns": "List of paragraphs ranked by BM25 score",
+        "when_to_use": [
+            "Query contains multiple related keywords",
+            "Need to find documents discussing a general topic",
+            "Keywords may appear in different forms (singular/plural, etc.)"
+        ],
+        "examples": [
+            "项目风险和应对措施 → query: '项目 风险 应对 措施'",
+            "系统架构设计方案 → query: '系统 架构 设计 方案'"
+        ]
+    },
+    {
+        "name": "semantic_search",
+        "category": "context_enhancement",
+        "description": "Vector-based semantic similarity search. Best for queries where exact keywords may not match document expressions.",
+        "parameters": {
+            "query": {"type": "string", "description": "Natural language query"},
+            "top_k": {"type": "integer", "default": 5}
+        },
+        "returns": "List of semantically similar paragraphs with relevance scores",
+        "when_to_use": [
+            "Query uses colloquial/informal expressions",
+            "Document may use synonyms or different phrasing",
+            "Query is abstract or conceptual",
+            "Cross-language matching needed"
+        ],
+        "examples": [
+            "这个项目花了多少钱 → 文档中可能是 '预算'、'投入资金'、'成本'",
+            "项目有什么问题 → 文档中可能是 '风险'、'挑战'、'困难'、'瓶颈'"
+        ]
+    }
+]
+```
+
+#### 6.2.3 搜索策略选择
+
+Agent 根据问题特征自动选择最优搜索策略：
+
+| 问题特征 | 推荐工具 | 原因 |
+|---------|---------|------|
+| 包含人名、项目名、专有名词 | keyword_search | 专有名词需要精确匹配 |
+| 包含具体数字（日期、金额、版本号） | keyword_search | 数字是精确信息 |
+| 包含多个相关关键词 | fulltext_search | BM25 擅长多词匹配和排序 |
+| 问题表述口语化/模糊 | semantic_search | 需要语义理解 |
+| 问的是抽象概念 | semantic_search | 可能有多种表述方式 |
+| 结构性问题（"第X章讲什么"） | get_document_structure | 需要层级导航 |
+
+**策略选择流程**：
+
+```
++------------------+
+| Analyze Question |
++------------------+
+         |
+         v
++------------------+     Yes    +------------------+
+| Has exact names/ |----------->| keyword_search   |
+| numbers/terms?   |            +------------------+
++------------------+
+         | No
+         v
++------------------+     Yes    +------------------+
+| Multiple related |----------->| fulltext_search  |
+| keywords?        |            +------------------+
++------------------+
+         | No
+         v
++------------------+     Yes    +------------------+
+| Vague/colloquial |----------->| semantic_search  |
+| expression?      |            +------------------+
++------------------+
+         | No
+         v
++------------------+
+| Default: try     |
+| fulltext first   |
++------------------+
+```
+
+**混合搜索示例**：
+
+```python
+def smart_search(question: str) -> list:
+    """Agent 可能组合多种搜索策略"""
+
+    # 示例：用户问 "张三在2024年负责的项目预算是多少"
+
+    # Step 1: 精确搜索找到张三相关段落
+    results1 = keyword_search(keywords=["张三", "2024"])
+
+    # Step 2: 如果预算信息不在同一段落，用语义搜索扩展
+    results2 = semantic_search(query="项目预算 资金 成本")
+
+    # Step 3: 合并结果，去重，返回
+    return merge_and_dedupe(results1, results2)
+```
+
+#### 6.2.4 浏览工具
+
+这类工具用于**深入探索**已定位的文档区域：
+
+```python
+browse_tools = [
     {
         "name": "get_node_content",
         "category": "context_enhancement",
@@ -972,7 +1191,7 @@ context_tools = [
 ]
 ```
 
-#### 6.2.3 分析工具
+#### 6.2.5 分析工具
 
 这类工具的目的是**处理和验证已有信息**，提升上下文质量：
 
@@ -999,7 +1218,7 @@ analysis_tools = [
 ]
 ```
 
-#### 6.2.4 外部行动工具（扩展）
+#### 6.2.6 外部行动工具（扩展）
 
 ```python
 external_tools = [
@@ -1016,7 +1235,7 @@ external_tools = [
 ]
 ```
 
-#### 6.2.5 终止工具
+#### 6.2.7 终止工具
 
 ```python
 terminal_tools = [
@@ -1993,6 +2212,47 @@ ocr:
 retrieval:
   top_k: 10                         # 默认检索数量
   relevance_threshold: 0.7          # 相关性阈值
+
+# 搜索策略配置
+search:
+  # 默认策略：auto 表示 Agent 自动选择
+  default_strategy: "auto"          # auto / keyword / fulltext / semantic
+
+  # 关键词搜索配置
+  keyword:
+    case_sensitive: false           # 是否区分大小写
+    max_results: 50                 # 最大返回结果数
+    context_lines: 2                # 匹配行前后显示的上下文行数
+
+  # 全文搜索配置 (PostgreSQL tsvector)
+  fulltext:
+    language: "chinese"             # 分词配置（需安装 pg_jieba 或 zhparser）
+    weights:                        # 字段权重
+      title: "A"                    # 标题权重最高
+      content: "B"                  # 内容次之
+      summary: "C"                  # 摘要最低
+    min_rank: 0.1                   # 最低排名阈值
+
+  # 语义搜索配置 (pgvector)
+  semantic:
+    enabled: true                   # 是否启用向量搜索（可关闭以节省资源）
+    relevance_threshold: 0.7        # 相似度阈值
+    top_k: 5                        # 返回结果数
+
+  # 策略选择规则（Agent 使用）
+  strategy_hints:
+    # 问题中包含这些模式时优先使用关键词搜索
+    keyword_patterns:
+      - "\\d{4}年"                  # 年份
+      - "[一-龥]{2,4}[项目|系统|平台]"  # 项目名
+      - "[A-Z][a-z]+[A-Z]"          # 驼峰命名（代码/技术术语）
+    # 问题中包含这些词时优先使用语义搜索
+    semantic_triggers:
+      - "什么"
+      - "怎么"
+      - "为什么"
+      - "有哪些"
+      - "如何"
 
 # Agent 配置
 agent:
