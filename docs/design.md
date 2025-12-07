@@ -33,6 +33,8 @@
   - [8.2 集成测试](#82-集成测试)
   - [8.3 测试数据](#83-测试数据)
 - [9. 开发计划](#9-开发计划)
+  - [9.1 MVP 版本](#91-mvp-版本)
+  - [9.2 完整版开发计划](#92-完整版开发计划)
 - [10. 扩展方向](#10-扩展方向)
 - [11. 附录](#11-附录)
   - [11.1 配置项](#111-配置项)
@@ -1009,9 +1011,13 @@ Agent 工具体系
 │   ├── verify_consistency    # 验证信息一致性
 │   └── summarize_findings    # 汇总已收集信息
 │
-└── 外部行动工具（External Action）- 扩展
-    │  目的：突破内部知识边界
-    └── search_web            # 外部搜索（未来）
+├── 外部行动工具（External Action）- 扩展
+│   │  目的：突破内部知识边界
+│   └── search_web            # 外部搜索（未来）
+│
+└── 终止工具（Terminal）
+    │  目的：结束推理循环，输出最终答案
+    └── final_answer          # 提供最终答案
 ```
 
 #### 6.2.2 搜索工具详解
@@ -1023,17 +1029,17 @@ search_tools = [
     {
         "name": "keyword_search",
         "category": "context_enhancement",
-        "description": "Search by exact keywords or regex patterns. Best for queries containing specific names, numbers, or technical terms.",
+        "description": "按关键词或正则表达式精确搜索。适用于包含具体名称、数字或专业术语的查询。",
         "parameters": {
-            "keywords": {"type": "array", "description": "List of keywords to search"},
+            "keywords": {"type": "array", "description": "要搜索的关键词列表"},
             "mode": {"type": "string", "enum": ["exact", "regex", "fuzzy"], "default": "exact"},
             "case_sensitive": {"type": "boolean", "default": False}
         },
-        "returns": "List of matching paragraphs with line numbers and context",
+        "returns": "匹配的段落列表，包含行号和上下文",
         "when_to_use": [
-            "Query contains person names, project names, or specific terms",
-            "Query contains numbers (dates, amounts, versions)",
-            "Query asks for exact definitions or specifications"
+            "问题中包含人名、项目名或特定术语",
+            "问题中包含数字（日期、金额、版本号）",
+            "问题询问精确定义或规格说明"
         ],
         "examples": [
             "张三负责哪些项目 → keywords: ['张三']",
@@ -1044,16 +1050,16 @@ search_tools = [
     {
         "name": "fulltext_search",
         "category": "context_enhancement",
-        "description": "BM25-based full-text search. Good balance between precision and recall, handles multiple keywords well.",
+        "description": "基于 BM25 的全文搜索。在精确度和召回率之间取得平衡，擅长处理多关键词查询。",
         "parameters": {
-            "query": {"type": "string", "description": "Search query with multiple terms"},
+            "query": {"type": "string", "description": "包含多个词的搜索查询"},
             "top_k": {"type": "integer", "default": 10}
         },
-        "returns": "List of paragraphs ranked by BM25 score",
+        "returns": "按 BM25 分数排序的段落列表",
         "when_to_use": [
-            "Query contains multiple related keywords",
-            "Need to find documents discussing a general topic",
-            "Keywords may appear in different forms (singular/plural, etc.)"
+            "问题包含多个相关关键词",
+            "需要查找讨论某个主题的文档",
+            "关键词可能以不同形式出现（单复数等）"
         ],
         "examples": [
             "项目风险和应对措施 → query: '项目 风险 应对 措施'",
@@ -1063,17 +1069,17 @@ search_tools = [
     {
         "name": "semantic_search",
         "category": "context_enhancement",
-        "description": "Vector-based semantic similarity search. Best for queries where exact keywords may not match document expressions.",
+        "description": "基于向量的语义相似度搜索。适用于精确关键词可能无法匹配文档表述的查询。",
         "parameters": {
-            "query": {"type": "string", "description": "Natural language query"},
+            "query": {"type": "string", "description": "自然语言查询"},
             "top_k": {"type": "integer", "default": 5}
         },
-        "returns": "List of semantically similar paragraphs with relevance scores",
+        "returns": "语义相似的段落列表，包含相关度分数",
         "when_to_use": [
-            "Query uses colloquial/informal expressions",
-            "Document may use synonyms or different phrasing",
-            "Query is abstract or conceptual",
-            "Cross-language matching needed"
+            "问题使用口语化/非正式表述",
+            "文档可能使用同义词或不同措辞",
+            "问题是抽象或概念性的",
+            "需要跨语言匹配"
         ],
         "examples": [
             "这个项目花了多少钱 → 文档中可能是 '预算'、'投入资金'、'成本'",
@@ -1155,38 +1161,38 @@ browse_tools = [
     {
         "name": "get_node_content",
         "category": "context_enhancement",
-        "description": "Get the full content of a specific node. Use when a search result snippet is not enough and you need more details.",
+        "description": "获取指定节点的完整内容。当搜索结果片段不够详细时使用。",
         "parameters": {
-            "node_id": {"type": "string", "description": "Node ID from search results"}
+            "node_id": {"type": "string", "description": "搜索结果中的节点 ID"}
         },
-        "returns": "Full node content with parent context"
+        "returns": "节点完整内容及父级上下文"
     },
     {
         "name": "get_section_children",
         "category": "context_enhancement",
-        "description": "Get all child nodes of a section. Use when you want to explore a topic in depth.",
+        "description": "获取章节的所有子节点。当需要深入探索某个主题时使用。",
         "parameters": {
-            "node_id": {"type": "string", "description": "Section node ID"}
+            "node_id": {"type": "string", "description": "章节节点 ID"}
         },
-        "returns": "List of child nodes (subsections and paragraphs)"
+        "returns": "子节点列表（子章节和段落）"
     },
     {
         "name": "get_document_structure",
         "category": "context_enhancement",
-        "description": "Get the hierarchical structure of a document. Use when you need to understand how a document is organized.",
+        "description": "获取文档的层级结构。当需要了解文档整体组织方式时使用。",
         "parameters": {
-            "document_id": {"type": "string", "description": "Document ID"}
+            "document_id": {"type": "string", "description": "文档 ID"}
         },
-        "returns": "Document tree structure with section titles and summaries"
+        "returns": "文档结构树，包含章节标题和摘要"
     },
     {
         "name": "get_related_documents",
         "category": "context_enhancement",
-        "description": "Get documents related by shared topics. Use for multi-hop reasoning when information might span multiple documents.",
+        "description": "获取具有相同话题的相关文档。用于多跳推理，当信息可能跨越多个文档时使用。",
         "parameters": {
-            "document_id": {"type": "string", "description": "Document ID"}
+            "document_id": {"type": "string", "description": "文档 ID"}
         },
-        "returns": "List of related documents with relevance scores"
+        "returns": "相关文档列表及相关度分数"
     }
 ]
 ```
@@ -1200,20 +1206,20 @@ analysis_tools = [
     {
         "name": "verify_consistency",
         "category": "analysis",
-        "description": "Verify if gathered information is consistent and non-contradictory. Use before final answer to ensure quality.",
+        "description": "验证收集到的信息是否一致、无矛盾。在给出最终答案前使用，确保回答质量。",
         "parameters": {
-            "statements": {"type": "array", "description": "List of statements to verify"}
+            "statements": {"type": "array", "description": "待验证的陈述列表"}
         },
-        "returns": "Consistency analysis with any contradictions identified"
+        "returns": "一致性分析结果，标识出任何矛盾之处"
     },
     {
         "name": "summarize_findings",
         "category": "analysis",
-        "description": "Summarize all information gathered so far. Use when context is getting large and needs consolidation.",
+        "description": "汇总目前收集到的所有信息。当上下文过大需要整合时使用。",
         "parameters": {
-            "focus": {"type": "string", "description": "Aspect to focus the summary on"}
+            "focus": {"type": "string", "description": "汇总的聚焦方向"}
         },
-        "returns": "Consolidated summary of findings"
+        "returns": "信息的整合摘要"
     }
 ]
 ```
@@ -1225,12 +1231,12 @@ external_tools = [
     {
         "name": "search_web",
         "category": "external_action",
-        "description": "Search the web for information not in internal documents. Use as fallback when internal search yields insufficient results.",
+        "description": "搜索互联网上的信息。当内部文档搜索结果不足时作为兜底方案使用。",
         "parameters": {
-            "query": {"type": "string", "description": "Search query"}
+            "query": {"type": "string", "description": "搜索查询"}
         },
-        "returns": "Web search results",
-        "enabled": False  # Future extension
+        "returns": "网络搜索结果",
+        "enabled": False  # 未来扩展
     }
 ]
 ```
@@ -1242,11 +1248,11 @@ terminal_tools = [
     {
         "name": "final_answer",
         "category": "terminal",
-        "description": "Provide the final answer. Use when you have gathered sufficient information to answer the question.",
+        "description": "提供最终答案。当已收集到足够信息可以回答问题时使用。",
         "parameters": {
-            "answer": {"type": "string", "description": "The answer with citations"},
+            "answer": {"type": "string", "description": "包含引用的答案"},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-            "sources": {"type": "array", "description": "List of sources used"}
+            "sources": {"type": "array", "description": "使用的来源列表"}
         }
     }
 ]
@@ -1513,51 +1519,55 @@ def agent_reasoning_loop(question: str, initial_contexts: list,
 
 ```python
 def agent_think(context: dict) -> tuple:
-    """Generate next thought and action."""
+    """生成下一步思考和行动"""
 
     history = format_reasoning_history(context["reasoning_trace"])
     strategy_hint = context.get("current_strategy", {}).get("hint", "")
 
-    prompt = f"""You are a research assistant answering questions by exploring documents.
+    prompt = f"""你是一个研究助手，通过探索文档来回答问题。
 
-## Question
+## 问题
 {context["question"]}
 
-## Available Tools
+## 可用工具
 
-**Context Enhancement:**
-- search_documents(query, top_k): Search for relevant documents
-- get_node_content(node_id): Get full content of a node
-- get_section_children(node_id): Explore section in depth
-- get_document_structure(document_id): Understand document organization
-- get_related_documents(document_id): Find connected documents
+**搜索工具：**
+- keyword_search(keywords, mode): 按关键词精确搜索
+- fulltext_search(query, top_k): BM25 全文搜索
+- semantic_search(query, top_k): 语义相似度搜索
 
-**Analysis:**
-- verify_consistency(statements): Check for contradictions
-- summarize_findings(focus): Consolidate gathered information
+**浏览工具：**
+- get_node_content(node_id): 获取节点完整内容
+- get_section_children(node_id): 深入探索章节
+- get_document_structure(document_id): 了解文档结构
+- get_related_documents(document_id): 查找相关文档
 
-**Terminal:**
-- final_answer(answer, confidence, sources): Provide final answer
+**分析工具：**
+- verify_consistency(statements): 检查信息是否矛盾
+- summarize_findings(focus): 汇总已收集的信息
 
-## Reasoning History
+**终止工具：**
+- final_answer(answer, confidence, sources): 提供最终答案
+
+## 推理历史
 {history}
 
-## Current State
-- Iteration: {context["iteration"]} / {MAX_ITERATIONS}
-- Information density: {context["info_density"]:.2f}
-- Strategy hint: {strategy_hint or "None"}
+## 当前状态
+- 迭代次数: {context["iteration"]} / {MAX_ITERATIONS}
+- 信息密度: {context["info_density"]:.2f}
+- 策略提示: {strategy_hint or "无"}
 
-## Instructions
-Think step by step:
-1. What do I know so far? Is it sufficient?
-2. What is missing or unclear?
-3. Which tool will best fill the gap?
-4. Am I ready to provide final_answer?
+## 指令
+请逐步思考：
+1. 目前我知道什么？信息是否充足？
+2. 还缺少什么信息或有什么不清楚的？
+3. 哪个工具最能填补这个空白？
+4. 我是否准备好提供 final_answer 了？
 
-Respond in this format:
-Thought: <your reasoning>
-Action: <tool_name>
-Parameters: <json>
+请按以下格式回复：
+思考: <你的推理过程>
+行动: <工具名称>
+参数: <json>
 """
 
     response = llm.generate(prompt)
@@ -2022,106 +2032,204 @@ class TestAgentReasoningFlow:
 
 ## 9. 开发计划
 
-按依赖关系排序的开发步骤：
+采用**渐进式开发**策略：MVP 是完整版的第一个可用切片，后续阶段在 MVP 基础上逐步扩展功能，代码 100% 复用。
 
-### 第一阶段：基础设施
+### 9.1 架构复用原则
 
-1. **项目初始化**
-   - 后端 FastAPI 项目结构
-   - 前端 Vue 3 项目结构
-   - PostgreSQL + pgvector 环境搭建
+MVP 阶段就按完整版标准搭建架构，确保后续只是"加功能"而非"重写"：
 
-2. **数据库层**
-   - 表结构创建
-   - 数据库连接封装
-   - 基础 CRUD 操作
+```
+完整版架构                        MVP 实现范围
+─────────────────────────────────────────────────────────
+数据库层                          ✓ 完整实现（表结构、索引）
+├── documents 表                  ✓ 完整
+├── nodes 表                      ✓ 完整
+├── 全文索引 (tsvector)           ✓ 完整
+├── 向量索引 (pgvector)           ✗ 后续添加
+└── topics 表                     ✗ 后续添加
 
-### 第二阶段：文档处理
+文档解析层                        ✓ 接口完整，实现部分
+├── Markdown 解析                 ✓ 实现
+├── Word/PPT/Excel 解析           ✗ 后续添加
+├── 结构规范化                    ✗ 后续添加
+└── 图片 OCR                      ✗ 后续添加
 
-3. **文档解析服务**
-   - unstructured 集成
-   - 各格式解析实现
-   - 层级结构提取
+检索层                            ✓ 接口完整，实现部分
+├── 全文搜索                      ✓ 实现
+├── 关键词搜索                    ✓ 实现
+└── 语义搜索                      ✗ 后续添加
 
-4. **结构规范化服务**
-   - 长段落语义切分
-   - 长 Section 自动拆分
-   - 无意义标题增强
+问答层                            ✓ 接口完整，实现部分
+├── 简单 RAG                      ✓ 实现
+└── Agentic RAG                   ✗ 后续添加
 
-5. **图片处理**
-   - PaddleOCR 集成
-   - 多模态理解接口
-   - 图片描述生成
+API 层                            ✓ 核心接口
+├── 文档上传/管理                 ✓ 实现
+├── 问答接口                      ✓ 实现
+└── 话题接口                      ✗ 后续添加
 
-6. **索引服务**
-   - LlamaIndex 集成
-   - 层级节点构建
-   - 嵌入生成与存储
-   - Section Summary 自动生成
+前端                              ✓ 最简可用
+├── 简单上传界面                  ✓ 实现
+├── 简单问答界面                  ✓ 实现
+└── 完整 UI                       ✗ 后续添加
+```
 
-### 第三阶段：标准问答功能
+### 9.2 开发阶段
 
-7. **RAG 检索**
-   - 向量检索实现
-   - Breadcrumb 上下文增强
-   - 版本过滤
+#### 第一阶段：MVP（核心验证）
 
-8. **LLM 问答（快速路径）**
-   - LLM 服务封装
-   - Prompt 模板
-   - 引用格式化
-   - 质量检查判断
+**目标**：快速验证核心价值——能上传文档、能问答、能看到引用来源。
 
-### 第四阶段：Agentic RAG
+**1. 基础设施**
+- 后端 FastAPI 项目结构（按完整版标准）
+- PostgreSQL + pg_jieba 中文分词
+- 配置管理（config.yaml）
+- 数据库表结构（documents、nodes，预留扩展字段）
 
-9. **Agent 工具集**
-   - 上下文增强工具（search_documents, get_node_content 等）
-   - 分析工具（verify_consistency, summarize_findings）
-   - 终止工具（final_answer）
+**2. Markdown 文档解析**
+- 解析 Markdown 标题层级（#/##/###）
+- 构建层级节点树
+- 存储到 nodes 表
+- 建立全文索引
 
-10. **Agent 控制器**
-    - 推理循环实现
-    - 状态管理
-    - 迭代控制
+**3. 检索服务**
+- 全文搜索（BM25）
+- Breadcrumb 上下文构建
+- 搜索结果格式化
 
-11. **反馈与策略**
-    - 结果评估器
-    - 自适应策略
-    - 信息密度计算
+**4. 问答服务**
+- LLM 服务封装（OpenAI API 格式）
+- RAG Prompt 模板
+- 答案 + 引用来源返回
 
-### 第五阶段：话题功能
+**5. 简单界面**
+- 文档上传 API
+- 问答 API
+- 最简 Web 页面（上传 + 问答）
 
-12. **话题提取**
-    - LLM 提取话题
-    - 话题相似度合并
+**MVP 验收标准**：
+- [ ] 能上传 Markdown 文件，自动解析层级结构
+- [ ] 能用自然语言提问，获得基于文档的回答
+- [ ] 回答中包含引用的文档名和章节路径
+- [ ] 端到端流程跑通
 
-13. **话题聚类**
-    - 问题话题识别
-    - 话题筛选功能
+---
 
-### 第六阶段：前端开发
+#### 第二阶段：多格式支持
 
-14. **基础页面**
-    - 布局框架
-    - 文档上传组件
-    - 文档列表
+**目标**：支持常见办公文档格式。
 
-15. **问答界面**
-    - 对话组件
-    - 引用展示
-    - 话题/版本筛选
-    - 推理过程展示（可折叠）
-    - 置信度/模式标签
+**6. 多格式解析**
+- unstructured 集成
+- Word (.docx) 解析
+- PowerPoint (.pptx) 解析
+- Excel (.xlsx) 解析
+- 统一的解析接口抽象
 
-16. **话题浏览**
-    - 话题列表
-    - 关联文档展示
+**7. 结构规范化**
+- 长段落语义切分
+- 长 Section 自动拆分
+- 无意义标题增强
 
-### 第七阶段：完善
+**8. 关键词搜索**
+- 精确关键词匹配
+- 正则表达式支持
+- 与全文搜索结果合并
 
-17. **版本管理 UI**
-18. **性能优化**
-19. **部署配置**
+**阶段验收标准**：
+- [ ] 能上传 Word/PPT/Excel 文件
+- [ ] 文档结构正确解析
+- [ ] 问答质量与 Markdown 一致
+
+---
+
+#### 第三阶段：智能增强
+
+**目标**：提升问答能力，支持复杂问题。
+
+**9. 语义搜索（可选）**
+- pgvector 扩展安装
+- Embedding 生成服务
+- 向量索引构建
+- 搜索策略自动选择
+
+**10. Agentic RAG**
+- Agent 工具集实现
+  - 搜索工具（keyword_search, fulltext_search, semantic_search）
+  - 浏览工具（get_node_content, get_section_children, get_document_structure）
+  - 关联工具（get_related_documents）
+  - 分析工具（verify_consistency, summarize_findings）
+  - 终止工具（final_answer）
+- Agent 控制器（推理循环）
+- 反馈评估与策略调整
+
+**11. 话题管理**
+- 话题自动提取
+- 话题相似度合并
+- 问题话题识别
+
+**阶段验收标准**：
+- [ ] 复杂问题（多跳推理）能正确回答
+- [ ] 能看到推理过程
+- [ ] 话题自动提取并可筛选
+
+---
+
+#### 第四阶段：完整体验
+
+**目标**：完善用户界面和生产可用性。
+
+**12. 完整前端**
+- Vue 3 + TailwindCSS
+- 文档管理界面（上传、列表、搜索）
+- 问答界面（对话、引用展示、推理过程）
+- 话题浏览界面
+
+**13. 版本管理**
+- 文档版本追踪
+- 版本切换查询
+- 版本管理 UI
+
+**14. 图片处理**
+- PaddleOCR 集成
+- 多模态理解（图片描述）
+- 图片内容纳入检索
+
+**15. 生产就绪**
+- 性能优化
+- 部署配置（Docker）
+- 监控与日志
+
+**阶段验收标准**：
+- [ ] 完整美观的 Web 界面
+- [ ] 支持文档版本管理
+- [ ] 图片内容可被问答
+- [ ] 可稳定部署运行
+
+---
+
+### 9.3 阶段依赖关系
+
+```
+第一阶段: MVP
+    │
+    │ 代码复用，接口兼容
+    ▼
+第二阶段: 多格式支持 ──────────────────┐
+    │                                  │
+    │ 代码复用，接口兼容                │ 可并行
+    ▼                                  │
+第三阶段: 智能增强 ◄───────────────────┘
+    │
+    │ 代码复用，接口兼容
+    ▼
+第四阶段: 完整体验
+```
+
+**说明**：
+- 每个阶段都产出可用的系统，不是"半成品"
+- 后续阶段复用前序阶段的代码，只做增量开发
+- 第二、三阶段可根据需求优先级调整顺序或并行
 
 ---
 
