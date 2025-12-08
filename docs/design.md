@@ -33,11 +33,15 @@
   - [8.2 集成测试](#82-集成测试)
   - [8.3 测试数据](#83-测试数据)
 - [9. 开发计划](#9-开发计划)
-  - [9.1 MVP 版本](#91-mvp-版本)
-  - [9.2 完整版开发计划](#92-完整版开发计划)
+  - [9.1 架构复用原则](#91-架构复用原则)
+  - [9.2 开发阶段](#92-开发阶段)
+  - [9.3 阶段依赖关系](#93-阶段依赖关系)
 - [10. 扩展方向](#10-扩展方向)
 - [11. 附录](#11-附录)
   - [11.1 配置项](#111-配置项)
+    - [11.1.1 索引服务配置](#1111-索引服务配置-indexeryaml)
+    - [11.1.2 QA 服务配置](#1112-qa-服务配置-serveryaml)
+    - [11.1.3 配置说明](#1113-配置说明)
   - [11.2 pgvector 安装](#112-pgvector-安装)
   - [11.3 依赖列表](#113-依赖列表)
   - [11.4 参考资料](#114-参考资料)
@@ -157,49 +161,82 @@
 
 ### 3.3 模块划分
 
+系统采用**双服务架构**，文档索引服务和 QA 服务完全解耦，通过 PostgreSQL 数据库通信：
+
 ```
-dropqa/
-├── backend/
-│   ├── api/                  # FastAPI 路由
-│   │   ├── documents.py      # 文档上传、管理接口
-│   │   ├── topics.py         # 话题相关接口
-│   │   └── qa.py             # 问答接口
-│   ├── services/
-│   │   ├── document_service.py   # 文档管理业务逻辑
-│   │   ├── parser_service.py     # 文档解析服务
-│   │   ├── normalizer_service.py # 结构规范化服务
-│   │   ├── index_service.py      # 索引构建服务
-│   │   ├── topic_service.py      # 话题提取与聚类
-│   │   ├── qa_service.py         # 问答入口服务
-│   │   └── llm_service.py        # LLM/Embedding 调用封装
-│   ├── agent/                # Agentic RAG 引擎
-│   │   ├── controller.py     # Agent 控制器（推理循环）
-│   │   ├── tools/            # Agent 工具集
-│   │   │   ├── context_tools.py   # 上下文增强工具
-│   │   │   ├── analysis_tools.py  # 分析工具
-│   │   │   └── external_tools.py  # 外部行动工具（扩展）
-│   │   ├── evaluator.py      # 反馈评估器
-│   │   ├── strategy.py       # 自适应策略
-│   │   └── prompts.py        # Agent 提示词模板
-│   ├── models/
-│   │   ├── database.py       # 数据库连接
-│   │   └── schemas.py        # Pydantic 模型
-│   ├── core/
-│   │   ├── config.py         # 配置管理
-│   │   └── ocr.py            # PaddleOCR 封装
-│   └── main.py               # FastAPI 入口
-├── frontend/
-│   ├── src/
-│   │   ├── views/            # 页面组件
-│   │   ├── components/       # 通用组件
-│   │   ├── api/              # API 调用封装
-│   │   └── stores/           # Pinia 状态管理
-│   └── ...
+┌─────────────────────────────────────────────────────────────┐
+│                      Shared: PostgreSQL                      │
+│              (documents, nodes, tsvector index)              │
+└─────────────────────────────────────────────────────────────┘
+        ▲                                       ▲
+        │ write                                 │ read
+        │                                       │
+┌───────┴───────────┐                 ┌─────────┴─────────┐
+│  Document Indexer │                 │    QA Server      │
+│                   │                 │                   │
+│ - watchdog        │                 │ - FastAPI         │
+│ - parse markdown  │                 │ - search          │
+│ - split nodes     │                 │ - LLM call        │
+│ - update index    │                 │ - answer          │
+└───────────────────┘                 └───────────────────┘
+        ▲                                       ▲
+        │ watch                                 │ HTTP
+        │                                       │
+   ┌────┴────┐                            ┌─────┴─────┐
+   │  docs/  │                            │   User    │
+   └─────────┘                            └───────────┘
+```
+
+**解耦优势**：
+- 文档处理失败不影响已索引内容的查询
+- 可独立扩展（文档多时加处理能力，用户多时加 QA 能力）
+- 文档处理可异步批量进行，QA 保持实时响应
+- 更容易分别测试和部署
+
+#### 项目结构
+
+```
+dropqa/                          # 项目根目录
+├── dropqa/                      # 主模块
+│   ├── indexer/                 # 文档索引服务
+│   │   ├── __main__.py          # 入口：python -m dropqa.indexer
+│   │   ├── watcher.py           # 文件监控 (watchdog)
+│   │   ├── parser.py            # 文档解析
+│   │   └── indexer.py           # 索引写入
+│   │
+│   ├── server/                  # QA 服务
+│   │   ├── __main__.py          # 入口：python -m dropqa.server
+│   │   ├── api.py               # FastAPI 路由
+│   │   ├── search.py            # 搜索逻辑
+│   │   └── qa.py                # LLM 问答
+│   │
+│   └── common/                  # 共享模块
+│       ├── db.py                # 数据库连接
+│       ├── models.py            # 数据模型（SQLAlchemy）
+│       ├── schemas.py           # Pydantic 模型
+│       └── config.py            # 配置管理
+│
+├── config/                      # 配置文件
+│   ├── indexer.example.yaml     # 索引服务配置示例
+│   └── server.example.yaml      # QA 服务配置示例
+│
 ├── tests/
-│   └── unit/                 # 单元测试
+│   └── unit/                    # 单元测试
+│
 ├── docs/
-│   └── design.md             # 本文档
+│   └── design.md                # 本文档
+│
 └── requirements.txt
+```
+
+#### 启动方式
+
+```bash
+# 终端1：启动文档索引服务（常驻，监控文件变化）
+python -m dropqa.indexer --config config/indexer.yaml
+
+# 终端2：启动 QA 服务
+python -m dropqa.server --config config/server.yaml
 ```
 
 ---
@@ -2251,13 +2288,12 @@ API 层                            ✓ 核心接口
 
 ### 11.1 配置项
 
-```yaml
-# config.yaml
+系统采用双配置文件，两个服务完全独立配置：
 
-# 服务配置
-server:
-  host: "0.0.0.0"
-  port: 8000
+#### 11.1.1 索引服务配置 (indexer.yaml)
+
+```yaml
+# config/indexer.yaml - 文档索引服务配置
 
 # 数据库配置
 database:
@@ -2267,36 +2303,36 @@ database:
   user: "postgres"
   password: "${DB_PASSWORD}"
 
-# 存储配置
-storage:
-  documents_path: "./data/documents"
-  images_path: "./data/images"
-
-# LLM 配置
-llm:
-  base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}"
-  model: "gpt-4"
-  temperature: 0.7
-  max_tokens: 2000
-
-# Embedding 配置
-embedding:
-  base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}"
-  model: "text-embedding-3-small"
-  dimensions: 1536
-
-# 文档解析配置
-parsing:
-  # 支持的文件类型
-  supported_types:
+# 文件监控配置
+watch:
+  directories:
+    - "~/dropqa_watching"           # 默认监控目录
+  extensions:
+    - ".md"
     - ".docx"
     - ".pptx"
     - ".xlsx"
-    - ".md"
-    - ".txt"
 
+# LLM 配置（用于生成摘要、标题增强等）
+llm:
+  api_base: "http://localhost:11434/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-32B"
+  temperature: 0.2
+  max_tokens: 16384
+  system_prompt: |
+    你是一个文档处理助手，负责生成摘要和标题。
+    输出要简洁准确，使用中文。
+
+# Embedding 模型配置（用于语义切分、向量索引）
+embedding:
+  api_base: "http://localhost:11435/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-Embedding-4B"
+  dimension: 2560
+
+# 文档解析配置
+parsing:
   # 结构规范化
   structure_normalization:
     max_paragraph_length: 800       # 超过此长度的段落会被切分
@@ -2311,10 +2347,52 @@ parsing:
     min_chunk_size: 100             # 最小 chunk 大小
     max_chunk_size: 1000            # 最大 chunk 大小
 
-# OCR 配置
+# OCR 配置（后续阶段启用）
 ocr:
   use_gpu: false
-  lang: "ch"  # ch: 中英文, en: 英文
+  lang: "ch"                        # ch: 中英文, en: 英文
+
+# 话题配置（后续阶段启用）
+topics:
+  max_topics_per_document: 5        # 每个文档最多提取的话题数
+  similarity_threshold: 0.85        # 话题合并的相似度阈值
+```
+
+#### 11.1.2 QA 服务配置 (server.yaml)
+
+```yaml
+# config/server.yaml - QA 服务配置
+
+# 服务配置
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+# 数据库配置
+database:
+  host: "localhost"
+  port: 5432
+  name: "dropqa"
+  user: "postgres"
+  password: "${DB_PASSWORD}"
+
+# LLM 配置（用于问答生成）
+llm:
+  api_base: "http://localhost:11434/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-32B"
+  temperature: 0.2
+  max_tokens: 16384
+  system_prompt: |
+    你是一个问答助手，回答要简明扼要，使用中文，输出使用 markdown 格式。
+    如果有什么不确定的问题，要反问用户，不要自己猜。
+
+# Embedding 模型配置（用于语义搜索）
+embedding:
+  api_base: "http://localhost:11435/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-Embedding-4B"
+  dimension: 2560
 
 # 检索配置
 retrieval:
@@ -2362,7 +2440,7 @@ search:
       - "有哪些"
       - "如何"
 
-# Agent 配置
+# Agent 配置（后续阶段启用）
 agent:
   # 基础配置
   max_iterations: 3                 # Agent 最大迭代次数
@@ -2395,12 +2473,25 @@ agent:
     search_top_k: 5                 # 搜索工具默认返回数量
     max_context_tokens: 4000        # 上下文最大 token 数
     enable_summarize: true          # 是否启用汇总工具
-
-# 话题配置
-topics:
-  max_topics_per_document: 5        # 每个文档最多提取的话题数
-  similarity_threshold: 0.85        # 话题合并的相似度阈值
 ```
+
+#### 11.1.3 配置说明
+
+| 配置项 | indexer | server | 说明 |
+|--------|---------|--------|------|
+| database | ✓ | ✓ | 两个服务连接同一数据库 |
+| watch | ✓ | ✗ | 仅 indexer 需要监控目录 |
+| server | ✗ | ✓ | 仅 server 需要 HTTP 端口 |
+| llm | ✓ | ✓ | 各自配置，可以相同或不同 |
+| embedding | ✓ | ✓ | 各自配置，可以相同或不同 |
+| parsing | ✓ | ✗ | 仅 indexer 需要解析配置 |
+| search | ✗ | ✓ | 仅 server 需要搜索配置 |
+| agent | ✗ | ✓ | 仅 server 需要 Agent 配置 |
+
+**配置分离的好处**：
+- 两个服务可部署在不同机器
+- 可以为不同服务配置不同的 LLM（如 indexer 用便宜模型生成摘要，server 用高质量模型回答）
+- 独立调优各自的参数
 
 ### 11.2 pgvector 安装
 
