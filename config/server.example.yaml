@@ -1,0 +1,52 @@
+# config/server.yaml - QA 服务配置
+# 复制此文件为 server.yaml 并修改配置
+
+# 服务配置
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+# 数据库配置
+database:
+  host: "localhost"
+  port: 5432
+  name: "dropqa"
+  user: "postgres"
+  password: "your_password_here"
+
+# LLM 配置（用于问答生成）
+llm:
+  api_base: "http://localhost:11434/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-32B"
+  temperature: 0.2
+  max_tokens: 16384
+  system_prompt: |
+    你是一个问答助手，回答要简明扼要，使用中文，输出使用 markdown 格式。
+    如果有什么不确定的问题，要反问用户，不要自己猜。
+
+# Embedding 模型配置（用于语义搜索）
+# MVP 阶段暂不使用，预留配置
+embedding:
+  api_base: "http://localhost:11435/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-Embedding-4B"
+  dimension: 2560
+
+# 检索配置
+retrieval:
+  top_k: 10
+  relevance_threshold: 0.7
+
+# 搜索策略配置
+search:
+  default_strategy: "fulltext"      # MVP 只用全文搜索
+
+  # 全文搜索配置
+  fulltext:
+    language: "chinese"
+    weights:
+      title: "A"
+      content: "B"
+      summary: "C"
+    min_rank: 0.1

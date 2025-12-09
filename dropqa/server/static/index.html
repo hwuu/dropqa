@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DropQA - 文档问答</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        #question {
+            flex: 1;
+            padding: 12px 16px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            outline: none;
+        }
+        #question:focus {
+            border-color: #007bff;
+        }
+        #submit {
+            padding: 12px 24px;
+            font-size: 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        #submit:hover {
+            background: #0056b3;
+        }
+        #submit:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .answer {
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .sources {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+        .sources h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        .source-item {
+            background: #f9f9f9;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+        .source-path {
+            font-size: 12px;
+            color: #007bff;
+            margin-bottom: 4px;
+        }
+        .source-snippet {
+            font-size: 13px;
+            color: #666;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+        }
+        .error {
+            background: #fee;
+            color: #c00;
+            padding: 12px;
+            border-radius: 8px;
+        }
+        #result {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DropQA</h1>
+
+        <div class="search-box">
+            <input type="text" id="question" placeholder="请输入您的问题..." autofocus>
+            <button id="submit">提问</button>
+        </div>
+
+        <div id="result"></div>
+    </div>
+
+    <script>
+        const questionInput = document.getElementById('question');
+        const submitBtn = document.getElementById('submit');
+        const resultDiv = document.getElementById('result');
+
+        async function ask() {
+            const question = questionInput.value.trim();
+            if (!question) return;
+
+            submitBtn.disabled = true;
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '<div class="loading">正在思考...</div>';
+
+            try {
+                const response = await fetch('/api/qa/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question })
+                });
+
+                if (!response.ok) {
+                    throw new Error('请求失败');
+                }
+
+                const data = await response.json();
+                renderResult(data);
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">错误: ${error.message}</div>`;
+            } finally {
+                submitBtn.disabled = false;
+            }
+        }
+
+        function renderResult(data) {
+            let html = `<div class="result">
+                <div class="answer">${escapeHtml(data.answer)}</div>`;
+
+            if (data.sources && data.sources.length > 0) {
+                html += `<div class="sources">
+                    <h3>引用来源</h3>`;
+
+                for (const source of data.sources) {
+                    html += `<div class="source-item">
+                        <div class="source-path">${escapeHtml(source.document_name)} > ${escapeHtml(source.path)}</div>
+                        <div class="source-snippet">${escapeHtml(source.content_snippet)}</div>
+                    </div>`;
+                }
+
+                html += '</div>';
+            }
+
+            html += '</div>';
+            resultDiv.innerHTML = html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        submitBtn.addEventListener('click', ask);
+        questionInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') ask();
+        });
+    </script>
+</body>
+</html>

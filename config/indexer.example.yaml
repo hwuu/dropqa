@@ -1,0 +1,37 @@
+# config/indexer.yaml - 文档索引服务配置
+# 复制此文件为 indexer.yaml 并修改配置
+
+# 数据库配置
+database:
+  host: "localhost"
+  port: 5432
+  name: "dropqa"
+  user: "postgres"
+  password: "your_password_here"
+
+# 文件监控配置
+watch:
+  directories:
+    - "~/dropqa_watching"           # 默认监控目录
+  extensions:
+    - ".md"
+
+# LLM 配置（用于生成摘要、标题增强等）
+# MVP 阶段暂不使用，预留配置
+llm:
+  api_base: "http://localhost:11434/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-32B"
+  temperature: 0.2
+  max_tokens: 16384
+  system_prompt: |
+    你是一个文档处理助手，负责生成摘要和标题。
+    输出要简洁准确，使用中文。
+
+# Embedding 模型配置（用于语义切分、向量索引）
+# MVP 阶段暂不使用，预留配置
+embedding:
+  api_base: "http://localhost:11435/v1"
+  api_key: "sk-"
+  model: "Qwen/Qwen3-Embedding-4B"
+  dimension: 2560
