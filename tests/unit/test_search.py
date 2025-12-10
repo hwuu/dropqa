@@ -11,6 +11,8 @@ from dropqa.server.search import (
     BreadcrumbItem,
     NodeContext,
 )
+from dropqa.common.repository import SearchResult as RepoSearchResult
+from dropqa.common.repository import NodeWithAncestors, AncestorInfo
 
 
 class TestSearchResult:
@@ -45,102 +47,83 @@ class TestSearchService:
     """SearchService 测试"""
 
     @pytest.fixture
-    def mock_db(self):
-        """创建模拟数据库"""
-        db = MagicMock()
-        return db
+    def mock_search_repo(self):
+        """创建模拟搜索仓库"""
+        repo = MagicMock()
+        return repo
 
     @pytest.fixture
-    def search_service(self, mock_db):
-        """创建 SearchService 实例"""
-        return SearchService(mock_db)
+    def mock_node_repo(self):
+        """创建模拟节点仓库"""
+        repo = MagicMock()
+        return repo
 
-    def test_search_service_init(self, search_service, mock_db):
+    @pytest.fixture
+    def search_service(self, mock_search_repo, mock_node_repo):
+        """创建 SearchService 实例"""
+        return SearchService(mock_search_repo, mock_node_repo)
+
+    def test_search_service_init(self, search_service, mock_search_repo, mock_node_repo):
         """测试 SearchService 初始化"""
-        assert search_service.db == mock_db
+        assert search_service._search_repo == mock_search_repo
+        assert search_service._node_repo == mock_node_repo
 
     @pytest.mark.asyncio
-    async def test_fulltext_search_returns_results(self, search_service, mock_db):
+    async def test_fulltext_search_returns_results(self, search_service, mock_search_repo):
         """测试全文搜索返回结果"""
-        # 模拟数据库返回
-        mock_rows = [
-            MagicMock(
-                id=uuid.uuid4(),
+        # 模拟仓库返回
+        mock_results = [
+            RepoSearchResult(
+                node_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
                 title="Chapter 1",
                 content="This is about Python programming",
                 rank=0.9,
             ),
-            MagicMock(
-                id=uuid.uuid4(),
+            RepoSearchResult(
+                node_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
                 title="Chapter 2",
                 content="More Python content",
                 rank=0.7,
             ),
         ]
-
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.fetchall = MagicMock(return_value=mock_rows)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_search_repo.fulltext_search = AsyncMock(return_value=mock_results)
 
         results = await search_service.fulltext_search("Python", top_k=10)
 
         assert len(results) == 2
         assert results[0].rank >= results[1].rank  # 按相关度排序
+        mock_search_repo.fulltext_search.assert_called_once_with("Python", 10)
 
     @pytest.mark.asyncio
-    async def test_fulltext_search_empty_query(self, search_service):
-        """测试空查询返回空结果"""
-        results = await search_service.fulltext_search("", top_k=10)
+    async def test_fulltext_search_empty_results(self, search_service, mock_search_repo):
+        """测试空结果"""
+        mock_search_repo.fulltext_search = AsyncMock(return_value=[])
+
+        results = await search_service.fulltext_search("nonexistent", top_k=10)
+
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_fulltext_search_respects_top_k(self, search_service, mock_db):
+    async def test_fulltext_search_respects_top_k(self, search_service, mock_search_repo):
         """测试 top_k 参数"""
-        # 模拟返回 5 个结果
-        mock_rows = [
-            MagicMock(
-                id=uuid.uuid4(),
+        mock_results = [
+            RepoSearchResult(
+                node_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
                 title=f"Title {i}",
                 content=f"Content {i}",
                 rank=0.9 - i * 0.1,
             )
-            for i in range(5)
+            for i in range(3)
         ]
-
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.fetchall = MagicMock(return_value=mock_rows[:3])  # 只返回 3 个
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_search_repo.fulltext_search = AsyncMock(return_value=mock_results)
 
         results = await search_service.fulltext_search("test", top_k=3)
 
-        assert len(results) <= 3
-
-    def test_build_tsquery_simple(self, search_service):
-        """测试构建简单查询"""
-        query = search_service._build_tsquery("hello world")
-        assert "hello" in query
-        assert "world" in query
-
-    def test_build_tsquery_chinese(self, search_service):
-        """测试构建中文查询"""
-        query = search_service._build_tsquery("项目 预算")
-        assert "项目" in query
-        assert "预算" in query
-
-    def test_build_tsquery_special_chars(self, search_service):
-        """测试特殊字符处理"""
-        query = search_service._build_tsquery("test's & query")
-        # 应该安全处理特殊字符
-        assert query is not None
+        assert len(results) == 3
+        mock_search_repo.fulltext_search.assert_called_once_with("test", 3)
 
 
 class TestBreadcrumb:
@@ -191,25 +174,50 @@ class TestGetNodeContext:
     """get_node_context 测试"""
 
     @pytest.fixture
-    def mock_db(self):
-        """创建模拟数据库"""
-        db = MagicMock()
-        return db
+    def mock_search_repo(self):
+        """创建模拟搜索仓库"""
+        repo = MagicMock()
+        return repo
 
     @pytest.fixture
-    def search_service(self, mock_db):
+    def mock_node_repo(self):
+        """创建模拟节点仓库"""
+        repo = MagicMock()
+        return repo
+
+    @pytest.fixture
+    def search_service(self, mock_search_repo, mock_node_repo):
         """创建 SearchService 实例"""
-        return SearchService(mock_db)
+        return SearchService(mock_search_repo, mock_node_repo)
 
     @pytest.mark.asyncio
-    async def test_get_node_context_not_found(self, search_service, mock_db):
+    async def test_get_node_context_not_found(self, search_service, mock_node_repo):
         """测试节点不存在"""
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.fetchone = MagicMock(return_value=None)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_node_repo.get_with_ancestors = AsyncMock(return_value=None)
 
         result = await search_service.get_node_context(uuid.uuid4())
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_node_context_found(self, search_service, mock_node_repo):
+        """测试找到节点"""
+        node_id = uuid.uuid4()
+        mock_node_repo.get_with_ancestors = AsyncMock(return_value=NodeWithAncestors(
+            node_id=node_id,
+            content="This is the content",
+            ancestors=[
+                AncestorInfo(title="文档", summary=None, depth=0),
+                AncestorInfo(title="第1章", summary="概述", depth=1),
+                AncestorInfo(title="1.1 背景", summary="背景介绍", depth=2),
+            ],
+            document_name="report.md",
+        ))
+
+        result = await search_service.get_node_context(node_id)
+
+        assert result is not None
+        assert result.node_id == node_id
+        assert result.content == "This is the content"
+        assert len(result.breadcrumb) == 3
+        assert result.document_name == "report.md"
+        assert "第1章" in result.get_path_string()

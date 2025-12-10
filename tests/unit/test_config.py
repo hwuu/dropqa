@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from dropqa.common.config import (
-    DatabaseConfig,
+    PostgresConfig,
     IndexerConfig,
     ServerAppConfig,
     WatchConfig,
@@ -17,12 +17,12 @@ from dropqa.common.config import (
 )
 
 
-class TestDatabaseConfig:
-    """数据库配置测试"""
+class TestPostgresConfig:
+    """PostgreSQL 配置测试"""
 
     def test_default_values(self):
         """测试默认值"""
-        config = DatabaseConfig()
+        config = PostgresConfig()
         assert config.host == "localhost"
         assert config.port == 5432
         assert config.name == "dropqa"
@@ -31,7 +31,7 @@ class TestDatabaseConfig:
 
     def test_url_generation(self):
         """测试 URL 生成"""
-        config = DatabaseConfig(
+        config = PostgresConfig(
             host="db.example.com",
             port=5433,
             name="testdb",

@@ -9,8 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from dropqa.common.config import ServerAppConfig
-from dropqa.common.db import Database, init_db
+from dropqa.common.config import ServerAppConfig, create_repository_factory
 from dropqa.server.llm import LLMService
 from dropqa.server.qa import QAService
 from dropqa.server.search import SearchService
@@ -51,13 +50,18 @@ def create_app(config: ServerAppConfig) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         """应用生命周期管理"""
-        # 启动时初始化数据库
-        db = init_db(config.database)
-        app.state.db = db
+        # 启动时初始化 Repository
+        repo_factory = create_repository_factory(config.storage)
+        await repo_factory.initialize()
+
+        app.state.repo_factory = repo_factory
         app.state.config = config
 
         # 初始化服务
-        search_service = SearchService(db)
+        search_service = SearchService(
+            repo_factory.get_search_repository(),
+            repo_factory.get_node_repository(),
+        )
         llm_service = LLMService(config.llm)
         qa_service = QAService(
             search_service,
@@ -69,7 +73,7 @@ def create_app(config: ServerAppConfig) -> FastAPI:
         yield
 
         # 关闭时清理资源
-        await db.close()
+        await repo_factory.close()
 
     app = FastAPI(
         title="DropQA",

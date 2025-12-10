@@ -8,6 +8,7 @@
   - [3.1 整体架构](#31-整体架构)
   - [3.2 技术栈](#32-技术栈)
   - [3.3 模块划分](#33-模块划分)
+  - [3.4 Repository 抽象层](#34-repository-抽象层)
 - [4. 数据结构设计](#4-数据结构设计)
   - [4.1 数据库表设计](#41-数据库表设计)
   - [4.2 向量索引设计](#42-向量索引设计)
@@ -237,6 +238,193 @@ python -m dropqa.indexer --config config/indexer.yaml
 
 # 终端2：启动 QA 服务
 python -m dropqa.server --config config/server.yaml
+```
+
+### 3.4 Repository 抽象层
+
+为支持多种存储后端（PostgreSQL、SQLite 等），系统采用 Repository 模式实现数据访问层抽象。
+
+#### 3.4.1 架构设计
+
+```
++-----------------------------------------------------------+
+|                    Business Logic                          |
+|              (SearchService, IndexerService)               |
++-----------------------------------------------------------+
+                             |
+                             | depends on interfaces
+                             v
++-----------------------------------------------------------+
+|                  Repository Interfaces                     |
+|  +---------------+  +---------------+  +----------------+  |
+|  | DocumentRepo  |  | NodeRepo      |  | SearchRepo     |  |
+|  | (interface)   |  | (interface)   |  | (interface)    |  |
+|  +---------------+  +---------------+  +----------------+  |
++-----------------------------------------------------------+
+                             |
+            +----------------+----------------+
+            |                                 |
+            v                                 v
++------------------------+     +------------------------+
+|   PostgreSQL Backend   |     |    SQLite Backend      |
+|  +------------------+  |     |  +------------------+  |
+|  | PostgresDocRepo  |  |     |  | SQLiteDocRepo    |  |
+|  | PostgresNodeRepo |  |     |  | SQLiteNodeRepo   |  |
+|  | PostgresSearch   |  |     |  | SQLiteSearch     |  |
+|  |   (tsvector)     |  |     |  |   (FTS5)         |  |
+|  +------------------+  |     |  +------------------+  |
++------------------------+     +------------------------+
+```
+
+#### 3.4.2 核心接口
+
+**数据类定义**（`dropqa/common/repository/base.py`）:
+
+```python
+@dataclass
+class DocumentData:
+    """文档数据"""
+    id: UUID
+    filename: str
+    file_type: str
+    file_hash: str
+    file_size: int
+    storage_path: str
+    current_version: int = 1
+
+@dataclass
+class NodeData:
+    """节点数据"""
+    id: UUID
+    document_id: UUID
+    parent_id: Optional[UUID]
+    node_type: str
+    depth: int
+    title: Optional[str]
+    content: Optional[str]
+    summary: Optional[str] = None
+    position: int = 0
+    version: int = 1
+
+@dataclass
+class SearchResult:
+    """搜索结果"""
+    node_id: UUID
+    document_id: UUID
+    title: Optional[str]
+    content: Optional[str]
+    rank: float
+
+@dataclass
+class NodeWithAncestors:
+    """带祖先信息的节点（用于构建 breadcrumb）"""
+    node_id: UUID
+    content: Optional[str]
+    ancestors: list[AncestorInfo]
+    document_name: str
+```
+
+**Repository 接口**:
+
+```python
+class DocumentRepository(ABC):
+    """文档仓库接口"""
+    async def save(self, doc: DocumentData) -> None: ...
+    async def get_by_id(self, doc_id: UUID) -> Optional[DocumentData]: ...
+    async def get_by_path(self, path: str) -> Optional[DocumentData]: ...
+    async def get_by_hash(self, file_hash: str) -> Optional[DocumentData]: ...
+    async def update(self, doc: DocumentData) -> None: ...
+    async def delete(self, doc_id: UUID) -> bool: ...
+    async def delete_by_path(self, path: str) -> bool: ...
+
+class NodeRepository(ABC):
+    """节点仓库接口"""
+    async def save_batch(self, nodes: list[NodeData]) -> None: ...
+    async def delete_by_document(self, document_id: UUID) -> None: ...
+    async def get_with_ancestors(self, node_id: UUID) -> Optional[NodeWithAncestors]: ...
+
+class SearchRepository(ABC):
+    """搜索仓库接口"""
+    async def fulltext_search(self, query: str, top_k: int = 10) -> list[SearchResult]: ...
+    async def vector_search(self, embedding: list[float], top_k: int = 10) -> list[SearchResult]: ...
+    async def hybrid_search(self, query: str, embedding: list[float], ...) -> list[SearchResult]: ...
+
+class RepositoryFactory(ABC):
+    """仓库工厂接口"""
+    def get_document_repository(self) -> DocumentRepository: ...
+    def get_node_repository(self) -> NodeRepository: ...
+    def get_search_repository(self) -> SearchRepository: ...
+    async def initialize(self) -> None: ...
+    async def close(self) -> None: ...
+```
+
+#### 3.4.3 存储后端配置
+
+通过配置文件选择存储后端：
+
+```yaml
+# config/server.yaml
+storage:
+  backend: "postgres"  # 或 "sqlite"
+
+  # PostgreSQL 配置
+  postgres:
+    host: "localhost"
+    port: 5432
+    name: "dropqa"
+    user: "postgres"
+    password: "${DB_PASSWORD}"
+
+  # SQLite 配置（轻量级部署）
+  sqlite:
+    db_path: "./data/dropqa.db"
+    chroma_path: "./data/chroma"  # 向量搜索预留
+```
+
+#### 3.4.4 后端实现对比
+
+| 特性 | PostgreSQL | SQLite |
+|------|-----------|--------|
+| **全文搜索** | tsvector + GIN 索引 | FTS5 虚拟表 |
+| **中文分词** | pg_jieba / zhparser | unicode61 (基础分词) |
+| **向量搜索** | pgvector 扩展 | ChromaDB (预留) |
+| **部署复杂度** | 需要独立数据库服务 | 单文件，零配置 |
+| **并发性能** | 高 | 中等 |
+| **适用场景** | 生产环境、多用户 | 开发测试、单机部署 |
+
+#### 3.4.5 工厂函数
+
+根据配置自动创建对应的仓库工厂：
+
+```python
+# dropqa/common/config.py
+def create_repository_factory(storage_config: StorageConfig) -> RepositoryFactory:
+    if storage_config.backend == StorageBackend.POSTGRES:
+        return PostgresRepositoryFactory(storage_config.postgres)
+    elif storage_config.backend == StorageBackend.SQLITE:
+        return SQLiteRepositoryFactory(storage_config.sqlite)
+    else:
+        raise ValueError(f"不支持的存储后端: {storage_config.backend}")
+```
+
+#### 3.4.6 使用示例
+
+```python
+# 在服务启动时初始化
+async def lifespan(app: FastAPI):
+    config = load_server_config("config/server.yaml")
+    repo_factory = create_repository_factory(config.storage)
+    await repo_factory.initialize()
+
+    # 创建服务，注入 Repository
+    search_service = SearchService(
+        repo_factory.get_search_repository(),
+        repo_factory.get_node_repository(),
+    )
+
+    yield
+
+    await repo_factory.close()
 ```
 
 ---

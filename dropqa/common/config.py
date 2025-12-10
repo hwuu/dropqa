@@ -1,15 +1,22 @@
 """配置管理模块"""
 
 import os
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
 
 
-class DatabaseConfig(BaseModel):
-    """数据库配置"""
+class StorageBackend(str, Enum):
+    """存储后端类型"""
+    POSTGRES = "postgres"
+    SQLITE = "sqlite"
+
+
+class PostgresConfig(BaseModel):
+    """PostgreSQL 数据库配置"""
     host: str = "localhost"
     port: int = 5432
     name: str = "dropqa"
@@ -25,6 +32,27 @@ class DatabaseConfig(BaseModel):
     def sync_url(self) -> str:
         """生成同步数据库连接 URL"""
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
+
+
+class SQLiteConfig(BaseModel):
+    """SQLite 配置"""
+    db_path: str = "./data/dropqa.db"
+    chroma_path: str = "./data/chroma"
+
+    def get_db_path(self) -> Path:
+        """获取数据库文件路径"""
+        return Path(self.db_path).expanduser().resolve()
+
+    def get_chroma_path(self) -> Path:
+        """获取 ChromaDB 路径"""
+        return Path(self.chroma_path).expanduser().resolve()
+
+
+class StorageConfig(BaseModel):
+    """存储配置"""
+    backend: StorageBackend = StorageBackend.POSTGRES
+    postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
 
 
 class WatchConfig(BaseModel):
@@ -82,7 +110,9 @@ class RetrievalConfig(BaseModel):
 
 class IndexerConfig(BaseModel):
     """Indexer 服务配置"""
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    # 保留 database 字段以保持向后兼容
+    database: PostgresConfig = Field(default_factory=PostgresConfig)
     watch: WatchConfig = Field(default_factory=WatchConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
@@ -91,7 +121,9 @@ class IndexerConfig(BaseModel):
 class ServerAppConfig(BaseModel):
     """Server 服务配置"""
     server: ServerConfig = Field(default_factory=ServerConfig)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    # 保留 database 字段以保持向后兼容
+    database: PostgresConfig = Field(default_factory=PostgresConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
@@ -143,3 +175,22 @@ def load_indexer_config(config_path: str | Path) -> IndexerConfig:
 def load_server_config(config_path: str | Path) -> ServerAppConfig:
     """加载 Server 配置"""
     return load_config(config_path, ServerAppConfig)  # type: ignore
+
+
+def create_repository_factory(storage_config: StorageConfig) -> "RepositoryFactory":
+    """根据配置创建 RepositoryFactory
+
+    Args:
+        storage_config: 存储配置
+
+    Returns:
+        RepositoryFactory 实例
+    """
+    from dropqa.common.repository import PostgresRepositoryFactory, SQLiteRepositoryFactory
+
+    if storage_config.backend == StorageBackend.POSTGRES:
+        return PostgresRepositoryFactory(storage_config.postgres)
+    elif storage_config.backend == StorageBackend.SQLITE:
+        return SQLiteRepositoryFactory(storage_config.sqlite)
+    else:
+        raise ValueError(f"不支持的存储后端: {storage_config.backend}")

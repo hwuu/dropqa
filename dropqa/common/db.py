@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from dropqa.common.config import DatabaseConfig
+from dropqa.common.config import PostgresConfig
 
 
 class Base(DeclarativeBase):
@@ -17,7 +17,7 @@ class Base(DeclarativeBase):
 class Database:
     """数据库管理类"""
 
-    def __init__(self, config: DatabaseConfig):
+    def __init__(self, config: PostgresConfig):
         self.config = config
         self.engine = create_async_engine(
             config.url,
@@ -60,7 +60,7 @@ class Database:
 _db: Database | None = None
 
 
-def init_db(config: DatabaseConfig) -> Database:
+def init_db(config: PostgresConfig) -> Database:
     """初始化数据库"""
     global _db
     _db = Database(config)

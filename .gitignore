@@ -210,5 +210,5 @@ __marimo__/
 nul
 
 data/
-config.yaml
-policy.yaml
+indexer.yaml
+server.yaml

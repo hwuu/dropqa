@@ -51,6 +51,48 @@
 
 ## 当前进度
 
+### 2024-12-10
+
+**Repository 抽象层重构完成！**
+
+新增：
+- Repository 抽象接口（`dropqa/common/repository/base.py`）
+  - DocumentRepository、NodeRepository、SearchRepository 接口
+  - DocumentData、NodeData、SearchResult、NodeWithAncestors 数据类
+- PostgreSQL 后端实现（`dropqa/common/repository/postgres.py`）
+  - PostgresDocumentRepository（文档 CRUD）
+  - PostgresNodeRepository（节点批量操作、祖先查询）
+  - PostgresSearchRepository（tsvector 全文搜索）
+  - PostgresRepositoryFactory（工厂类）
+- SQLite 后端实现（`dropqa/common/repository/sqlite.py`）
+  - SQLiteDocumentRepository（文档 CRUD）
+  - SQLiteNodeRepository（节点批量操作、递归 CTE 祖先查询）
+  - SQLiteSearchRepository（FTS5 全文搜索）
+  - SQLiteRepositoryFactory（工厂类、自动建表）
+- 配置扩展（`dropqa/common/config.py`）
+  - StorageBackend 枚举（POSTGRES、SQLITE）
+  - StorageConfig 统一配置
+  - create_repository_factory() 工厂函数
+- 单元测试（`tests/unit/test_repository.py`）
+  - 数据类测试
+  - 存储配置测试
+  - PostgreSQL 仓库工厂测试
+  - PostgreSQL 搜索仓库测试（tsquery 构建）
+  - SQLite 仓库工厂测试
+  - SQLite 搜索仓库测试（FTS5 查询构建）
+  - SQLite 文档仓库集成测试
+  - SQLite 节点仓库集成测试
+  - SQLite 全文搜索集成测试
+
+修改：
+- SearchService 改用 Repository 接口
+- app.py 使用 RepositoryFactory
+- requirements.txt 添加 aiosqlite 依赖
+
+单元测试：109 passed, 1 skipped
+
+---
+
 ### 2024-12-08
 
 **MVP 开发完成！**
