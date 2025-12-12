@@ -1,10 +1,13 @@
 """全文搜索服务"""
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Optional
 
 from dropqa.common.repository import SearchRepository, NodeRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,7 +81,9 @@ class SearchService:
         Returns:
             搜索结果列表，按相关度降序排列
         """
+        logger.debug(f"[Search] 全文搜索: query='{query}', top_k={top_k}")
         results = await self._search_repo.fulltext_search(query, top_k)
+        logger.debug(f"[Search] 返回 {len(results)} 条结果")
 
         return [
             SearchResult(

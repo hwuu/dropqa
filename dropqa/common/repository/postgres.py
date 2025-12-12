@@ -1,5 +1,6 @@
 """PostgreSQL 后端实现"""
 
+import logging
 import re
 from typing import Optional
 from uuid import UUID
@@ -20,6 +21,8 @@ from dropqa.common.repository.base import (
     SearchRepository,
     SearchResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -242,6 +245,8 @@ class PostgresSearchRepository(SearchRepository):
         if not tsquery:
             return []
 
+        logger.debug(f"[PostgresSearch] 原始查询: '{query}' -> tsquery: '{tsquery}'")
+
         sql = text("""
             SELECT
                 n.id,
@@ -261,6 +266,8 @@ class PostgresSearchRepository(SearchRepository):
                 {"tsquery": tsquery, "top_k": top_k},
             )
             rows = result.fetchall()
+
+        logger.debug(f"[PostgresSearch] 匹配到 {len(rows)} 条结果")
 
         return [
             SearchResult(
@@ -292,13 +299,18 @@ class PostgresSearchRepository(SearchRepository):
         raise NotImplementedError("PostgreSQL 混合搜索尚未实现")
 
     def _build_tsquery(self, query: str) -> str:
-        """构建 tsquery 查询字符串"""
+        """构建 tsquery 查询字符串
+
+        使用 OR 操作符，只要匹配任意一个词就返回结果。
+        这样用户问 "DropQA 是什么？" 时，即使 "是什么" 不在文档中，
+        也能匹配到包含 "DropQA" 的文档。
+        """
         cleaned = re.sub(r"[^\w\u4e00-\u9fff\s]", " ", query)
         words = cleaned.split()
         words = [w.strip() for w in words if w.strip()]
         if not words:
             return ""
-        return " & ".join(words)
+        return " | ".join(words)
 
 
 class PostgresRepositoryFactory(RepositoryFactory):
@@ -334,8 +346,10 @@ class PostgresRepositoryFactory(RepositoryFactory):
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-        # 创建全文搜索索引
-        fulltext_sql = text("""
+        # 创建全文搜索索引 - 拆分成单独的语句执行
+        fulltext_statements = [
+            # 1. 添加全文搜索向量列（如果不存在）
+            """
             DO $$
             BEGIN
                 IF NOT EXISTS (
@@ -344,8 +358,10 @@ class PostgresRepositoryFactory(RepositoryFactory):
                 ) THEN
                     ALTER TABLE nodes ADD COLUMN search_vector tsvector;
                 END IF;
-            END $$;
-
+            END $$
+            """,
+            # 2. 创建或替换更新搜索向量的函数
+            """
             CREATE OR REPLACE FUNCTION update_nodes_search_vector()
             RETURNS trigger AS $$
             BEGIN
@@ -355,24 +371,31 @@ class PostgresRepositoryFactory(RepositoryFactory):
                     setweight(to_tsvector('simple', COALESCE(NEW.summary, '')), 'C');
                 RETURN NEW;
             END;
-            $$ LANGUAGE plpgsql;
-
-            DROP TRIGGER IF EXISTS nodes_search_vector_update ON nodes;
+            $$ LANGUAGE plpgsql
+            """,
+            # 3. 删除旧触发器（如果存在）
+            "DROP TRIGGER IF EXISTS nodes_search_vector_update ON nodes",
+            # 4. 创建触发器
+            """
             CREATE TRIGGER nodes_search_vector_update
                 BEFORE INSERT OR UPDATE ON nodes
-                FOR EACH ROW EXECUTE FUNCTION update_nodes_search_vector();
-
-            CREATE INDEX IF NOT EXISTS nodes_search_idx ON nodes USING gin(search_vector);
-
+                FOR EACH ROW EXECUTE FUNCTION update_nodes_search_vector()
+            """,
+            # 5. 创建 GIN 索引（如果不存在）
+            "CREATE INDEX IF NOT EXISTS nodes_search_idx ON nodes USING gin(search_vector)",
+            # 6. 更新现有数据的搜索向量
+            """
             UPDATE nodes SET search_vector =
                 setweight(to_tsvector('simple', COALESCE(title, '')), 'A') ||
                 setweight(to_tsvector('simple', COALESCE(content, '')), 'B') ||
                 setweight(to_tsvector('simple', COALESCE(summary, '')), 'C')
-            WHERE search_vector IS NULL;
-        """)
+            WHERE search_vector IS NULL
+            """,
+        ]
 
         async with self._engine.begin() as conn:
-            await conn.execute(fulltext_sql)
+            for stmt in fulltext_statements:
+                await conn.execute(text(stmt))
 
     async def close(self) -> None:
         """关闭连接"""

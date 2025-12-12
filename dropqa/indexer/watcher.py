@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Windows 文件复制时的重试配置
+FILE_READ_RETRY_TIMES = 5  # 最大重试次数
+FILE_READ_RETRY_DELAY = 0.5  # 每次重试间隔（秒）
+
 
 class FileWatcher:
     """文件监控器
@@ -33,6 +37,8 @@ class FileWatcher:
         self.indexer = indexer
         self._observer: Observer | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 用于去重：防止短时间内多次处理同一文件
+        self._pending_files: set[str] = set()
 
     def _should_process(self, file_path: Path) -> bool:
         """判断是否应该处理该文件
@@ -50,6 +56,31 @@ class FileWatcher:
         # 检查扩展名
         suffix = file_path.suffix.lower()
         return suffix in [ext.lower() for ext in self.config.extensions]
+
+    async def _wait_for_file_ready(self, file_path: Path) -> bool:
+        """等待文件可读（处理 Windows 文件锁问题）
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            文件是否可读
+        """
+        for attempt in range(FILE_READ_RETRY_TIMES):
+            try:
+                # 尝试读取文件前几个字节，验证文件可访问
+                with open(file_path, "rb") as f:
+                    f.read(1)
+                return True
+            except PermissionError:
+                if attempt < FILE_READ_RETRY_TIMES - 1:
+                    await asyncio.sleep(FILE_READ_RETRY_DELAY)
+                else:
+                    return False
+            except FileNotFoundError:
+                # 文件可能被删除了
+                return False
+        return False
 
     async def scan_existing_files(self) -> int:
         """扫描并索引现有文件
@@ -75,19 +106,44 @@ class FileWatcher:
 
         return count
 
+    async def _handle_file_event(self, file_path: str, event_type: str) -> None:
+        """统一处理文件事件（带去重和重试）
+
+        Args:
+            file_path: 文件路径
+            event_type: 事件类型 (created, modified)
+        """
+        path = Path(file_path)
+        if not self._should_process(path):
+            return
+
+        # 去重：如果文件已在处理队列中，跳过
+        path_str = str(path)
+        if path_str in self._pending_files:
+            return
+        self._pending_files.add(path_str)
+
+        try:
+            # 等待文件可读
+            if not await self._wait_for_file_ready(path):
+                logger.warning(f"文件无法访问，跳过: {path}")
+                return
+
+            # 索引文件
+            await self.indexer.index_file(path)
+            logger.info(f"已索引（{'新建' if event_type == 'created' else '更新'}）: {path}")
+        except Exception as e:
+            logger.error(f"索引失败 {path}: {e}")
+        finally:
+            self._pending_files.discard(path_str)
+
     async def _handle_created(self, file_path: str) -> None:
         """处理文件创建事件
 
         Args:
             file_path: 文件路径
         """
-        path = Path(file_path)
-        if self._should_process(path):
-            try:
-                await self.indexer.index_file(path)
-                logger.info(f"已索引新文件: {path}")
-            except Exception as e:
-                logger.error(f"索引新文件失败 {path}: {e}")
+        await self._handle_file_event(file_path, "created")
 
     async def _handle_modified(self, file_path: str) -> None:
         """处理文件修改事件
@@ -95,13 +151,7 @@ class FileWatcher:
         Args:
             file_path: 文件路径
         """
-        path = Path(file_path)
-        if self._should_process(path):
-            try:
-                await self.indexer.index_file(path)
-                logger.info(f"已更新索引: {path}")
-            except Exception as e:
-                logger.error(f"更新索引失败 {path}: {e}")
+        await self._handle_file_event(file_path, "modified")
 
     async def _handle_deleted(self, file_path: str) -> None:
         """处理文件删除事件

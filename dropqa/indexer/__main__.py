@@ -36,8 +36,10 @@ async def main(config_path: str) -> None:
     config = load_indexer_config(config_path)
 
     # 2. 初始化数据库
-    logger.info(f"连接数据库: {config.database.host}:{config.database.port}/{config.database.name}")
-    db = Database(config.database)
+    # 使用 storage.postgres 配置（新格式）
+    pg_config = config.storage.postgres
+    logger.info(f"连接数据库: {pg_config.host}:{pg_config.port}/{pg_config.name}")
+    db = Database(pg_config)
 
     # 3. 创建 Indexer 和 FileWatcher
     indexer = Indexer(db)

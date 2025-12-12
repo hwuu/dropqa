@@ -6,13 +6,22 @@ server:
   host: "0.0.0.0"
   port: 8000
 
-# 数据库配置
-database:
-  host: "localhost"
-  port: 5432
-  name: "dropqa"
-  user: "postgres"
-  password: "your_password_here"
+# 存储后端配置
+storage:
+  backend: "postgres"  # 或 "sqlite"
+
+  # PostgreSQL 配置
+  postgres:
+    host: "localhost"
+    port: 5432
+    name: "dropqa"
+    user: "postgres"
+    password: "your_password_here"
+
+  # SQLite 配置（轻量级部署）
+  sqlite:
+    db_path: "./data/dropqa.db"
+    chroma_path: "./data/chroma"
 
 # LLM 配置（用于问答生成）
 llm:

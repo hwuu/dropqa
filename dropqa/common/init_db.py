@@ -5,62 +5,18 @@
 
 功能:
     1. 创建数据库表 (documents, nodes)
-    2. 创建全文搜索索引 (tsvector + GIN)
+    2. 创建全文搜索索引 (PostgreSQL: tsvector + GIN, SQLite: FTS5)
 """
 
 import argparse
 import asyncio
 from pathlib import Path
 
-from sqlalchemy import text
-
-from dropqa.common.config import load_indexer_config
-from dropqa.common.db import Database
-from dropqa.common.models import Base
-
-
-# 全文搜索相关 SQL
-FULLTEXT_SEARCH_SQL = """
--- 添加全文搜索向量列（如果不存在）
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'nodes' AND column_name = 'search_vector'
-    ) THEN
-        ALTER TABLE nodes ADD COLUMN search_vector tsvector;
-    END IF;
-END $$;
-
--- 创建或替换更新搜索向量的函数
--- 注意：MVP 阶段使用 simple 配置，后续可切换为 chinese（需要 pg_jieba）
-CREATE OR REPLACE FUNCTION update_nodes_search_vector()
-RETURNS trigger AS $$
-BEGIN
-    NEW.search_vector :=
-        setweight(to_tsvector('simple', COALESCE(NEW.title, '')), 'A') ||
-        setweight(to_tsvector('simple', COALESCE(NEW.content, '')), 'B') ||
-        setweight(to_tsvector('simple', COALESCE(NEW.summary, '')), 'C');
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- 创建触发器（如果不存在）
-DROP TRIGGER IF EXISTS nodes_search_vector_update ON nodes;
-CREATE TRIGGER nodes_search_vector_update
-    BEFORE INSERT OR UPDATE ON nodes
-    FOR EACH ROW EXECUTE FUNCTION update_nodes_search_vector();
-
--- 创建 GIN 索引（如果不存在）
-CREATE INDEX IF NOT EXISTS nodes_search_idx ON nodes USING gin(search_vector);
-
--- 更新现有数据的搜索向量
-UPDATE nodes SET search_vector =
-    setweight(to_tsvector('simple', COALESCE(title, '')), 'A') ||
-    setweight(to_tsvector('simple', COALESCE(content, '')), 'B') ||
-    setweight(to_tsvector('simple', COALESCE(summary, '')), 'C')
-WHERE search_vector IS NULL;
-"""
+from dropqa.common.config import (
+    StorageBackend,
+    load_indexer_config,
+    create_repository_factory,
+)
 
 
 async def init_database(config_path: str) -> None:
@@ -68,25 +24,28 @@ async def init_database(config_path: str) -> None:
     print(f"加载配置: {config_path}")
     config = load_indexer_config(config_path)
 
-    print(f"连接数据库: {config.database.host}:{config.database.port}/{config.database.name}")
-    db = Database(config.database)
+    backend = config.storage.backend
+    print(f"存储后端: {backend.value}")
+
+    if backend == StorageBackend.POSTGRES:
+        pg_config = config.storage.postgres
+        print(f"连接数据库: {pg_config.host}:{pg_config.port}/{pg_config.name}")
+    elif backend == StorageBackend.SQLITE:
+        sqlite_config = config.storage.sqlite
+        print(f"数据库文件: {sqlite_config.db_path}")
+
+    # 使用 RepositoryFactory 初始化
+    repo_factory = create_repository_factory(config.storage)
 
     try:
-        # 1. 创建表
-        print("创建数据库表...")
-        await db.create_tables()
-        print("  ✓ 表创建完成")
-
-        # 2. 创建全文搜索索引
-        print("创建全文搜索索引...")
-        async with db.engine.begin() as conn:
-            await conn.execute(text(FULLTEXT_SEARCH_SQL))
-        print("  ✓ 全文搜索索引创建完成")
+        print("初始化数据库...")
+        await repo_factory.initialize()
+        print("  ✓ 数据库初始化完成")
 
         print("\n数据库初始化完成！")
 
     finally:
-        await db.close()
+        await repo_factory.close()
 
 
 def main() -> None:

@@ -94,42 +94,67 @@ class QAService:
                 sources=[],
             )
 
+        logger.debug(f"[RAG] 开始处理问题: {question}")
+
         # 1. 搜索相关文档
+        logger.debug(f"[RAG] 步骤1: 全文搜索, top_k={self.top_k}")
         search_results = await self.search_service.fulltext_search(
             question,
             top_k=self.top_k,
         )
+        logger.debug(f"[RAG] 搜索结果数量: {len(search_results)}")
 
         if not search_results:
+            logger.debug("[RAG] 无搜索结果，返回默认回答")
             # 无搜索结果
             answer = await self.llm_service.chat([
                 {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
             ])
             return QAResponse(answer=answer, sources=[])
 
+        # 打印搜索结果详情
+        for i, result in enumerate(search_results, 1):
+            logger.debug(
+                f"[RAG] 搜索结果 {i}: "
+                f"rank={result.rank:.4f}, "
+                f"title={result.title}, "
+                f"content_preview={result.content[:100] if result.content else 'None'}..."
+            )
+
         # 2. 获取节点上下文
+        logger.debug("[RAG] 步骤2: 获取节点上下文")
         contexts: list[NodeContext] = []
         for result in search_results:
             context = await self.search_service.get_node_context(result.node_id)
             if context:
                 contexts.append(context)
+                logger.debug(
+                    f"[RAG] 上下文: doc={context.document_name}, "
+                    f"path={context.get_path_string()}"
+                )
 
         if not contexts:
+            logger.debug("[RAG] 无有效上下文，返回默认回答")
             answer = await self.llm_service.chat([
                 {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
             ])
             return QAResponse(answer=answer, sources=[])
 
         # 3. 构建 Prompt
+        logger.debug("[RAG] 步骤3: 构建 Prompt")
         prompt = self._build_context_prompt(contexts, question)
+        logger.debug(f"[RAG] Prompt 长度: {len(prompt)} 字符")
 
         # 4. 调用 LLM
+        logger.debug("[RAG] 步骤4: 调用 LLM")
         answer = await self.llm_service.chat([
             {"role": "user", "content": prompt}
         ])
+        logger.debug(f"[RAG] LLM 回答长度: {len(answer)} 字符")
 
         # 5. 构建来源引用
         sources = self._build_sources(contexts)
+        logger.debug(f"[RAG] 步骤5: 构建来源引用, 数量={len(sources)}")
 
         return QAResponse(answer=answer, sources=sources)
 
