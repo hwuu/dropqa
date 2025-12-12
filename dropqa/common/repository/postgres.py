@@ -20,6 +20,7 @@ from dropqa.common.repository.base import (
     RepositoryFactory,
     SearchRepository,
     SearchResult,
+    SearchStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,111 @@ class PostgresSearchRepository(SearchRepository):
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._session_factory = session_factory
+
+    async def search(
+        self,
+        query: str,
+        strategy: SearchStrategy = "auto",
+        top_k: int = 10,
+    ) -> list[SearchResult]:
+        """统一搜索入口"""
+        query = query.strip()
+        if not query:
+            return []
+
+        if strategy == "auto" or strategy == "fulltext":
+            return await self.fulltext_search(query, top_k)
+        elif strategy == "keyword":
+            return await self.keyword_search(query, top_k)
+        elif strategy == "regex":
+            return await self.regex_search(query, top_k)
+        else:
+            return await self.fulltext_search(query, top_k)
+
+    async def keyword_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
+        """关键词搜索（精确匹配，不区分大小写）"""
+        query = query.strip()
+        if not query:
+            return []
+
+        logger.debug(f"[PostgresKeyword] 关键词搜索: '{query}'")
+
+        # 使用 ILIKE 进行不区分大小写的匹配
+        # 搜索 title 和 content 字段
+        sql = text("""
+            SELECT
+                n.id,
+                n.document_id,
+                n.title,
+                n.content,
+                1.0 AS rank
+            FROM nodes n
+            WHERE n.title ILIKE :pattern OR n.content ILIKE :pattern
+            LIMIT :top_k
+        """)
+
+        pattern = f"%{query}%"
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                sql,
+                {"pattern": pattern, "top_k": top_k},
+            )
+            rows = result.fetchall()
+
+        logger.debug(f"[PostgresKeyword] 匹配到 {len(rows)} 条结果")
+
+        return [
+            SearchResult(
+                node_id=row.id,
+                document_id=row.document_id,
+                title=row.title,
+                content=row.content,
+                rank=float(row.rank),
+            )
+            for row in rows
+        ]
+
+    async def regex_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
+        """正则表达式搜索（仅 PostgreSQL 支持）"""
+        query = query.strip()
+        if not query:
+            return []
+
+        logger.debug(f"[PostgresRegex] 正则搜索: '{query}'")
+
+        # 使用 PostgreSQL 的 ~* 操作符（不区分大小写的正则匹配）
+        sql = text("""
+            SELECT
+                n.id,
+                n.document_id,
+                n.title,
+                n.content,
+                1.0 AS rank
+            FROM nodes n
+            WHERE n.title ~* :pattern OR n.content ~* :pattern
+            LIMIT :top_k
+        """)
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                sql,
+                {"pattern": query, "top_k": top_k},
+            )
+            rows = result.fetchall()
+
+        logger.debug(f"[PostgresRegex] 匹配到 {len(rows)} 条结果")
+
+        return [
+            SearchResult(
+                node_id=row.id,
+                document_id=row.document_id,
+                title=row.title,
+                content=row.content,
+                rank=float(row.rank),
+            )
+            for row in rows
+        ]
 
     async def fulltext_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         query = query.strip()

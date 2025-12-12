@@ -690,3 +690,124 @@ class TestSQLiteFulltextSearch:
         search_repo = factory.get_search_repository()
         results = await search_repo.fulltext_search("nonexistent_term_xyz", top_k=10)
         assert results == []
+
+
+class TestSearchStrategy:
+    """搜索策略测试"""
+
+    @pytest.fixture
+    async def factory(self, tmp_path: Path):
+        """创建并初始化测试工厂"""
+        config = SQLiteConfig(
+            db_path=str(tmp_path / "test.db"),
+            chroma_path=str(tmp_path / "chroma"),
+        )
+        factory = SQLiteRepositoryFactory(config)
+        await factory.initialize()
+        return factory
+
+    @pytest.fixture
+    async def populated_factory(self, factory):
+        """创建已有数据的工厂"""
+        doc_repo = factory.get_document_repository()
+        node_repo = factory.get_node_repository()
+
+        # 创建文档
+        doc_id = uuid.uuid4()
+        doc = DocumentData(
+            id=doc_id,
+            filename="test.md",
+            file_type="md",
+            file_hash="abc123",
+            file_size=1024,
+            storage_path="/path/to/test.md",
+        )
+        await doc_repo.save(doc)
+
+        # 创建节点
+        nodes = [
+            NodeData(
+                id=uuid.uuid4(),
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="DropQA Introduction",
+                content="DropQA is a document question answering system.",
+            ),
+            NodeData(
+                id=uuid.uuid4(),
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="Configuration Guide",
+                content="This section covers PostgreSQL and SQLite configuration.",
+            ),
+        ]
+        await node_repo.save_batch(nodes)
+
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_search_with_auto_strategy(self, populated_factory):
+        """测试 auto 策略（默认使用 fulltext）"""
+        search_repo = populated_factory.get_search_repository()
+        results = await search_repo.search("DropQA", strategy="auto", top_k=10)
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_search_with_fulltext_strategy(self, populated_factory):
+        """测试 fulltext 策略"""
+        search_repo = populated_factory.get_search_repository()
+        results = await search_repo.search("DropQA", strategy="fulltext", top_k=10)
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_search_with_keyword_strategy(self, populated_factory):
+        """测试 keyword 策略"""
+        search_repo = populated_factory.get_search_repository()
+        results = await search_repo.search("DropQA", strategy="keyword", top_k=10)
+        assert len(results) >= 1
+        # 关键词搜索匹配的结果 rank 应该是 1.0
+        assert all(r.rank == 1.0 for r in results)
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_case_insensitive(self, populated_factory):
+        """测试关键词搜索不区分大小写"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 小写搜索
+        results_lower = await search_repo.keyword_search("dropqa", top_k=10)
+        # 大写搜索
+        results_upper = await search_repo.keyword_search("DROPQA", top_k=10)
+        # 混合大小写
+        results_mixed = await search_repo.keyword_search("DropQA", top_k=10)
+
+        # 都应该返回相同数量的结果
+        assert len(results_lower) == len(results_upper) == len(results_mixed)
+        assert len(results_lower) >= 1
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_empty_query(self, populated_factory):
+        """测试空关键词搜索"""
+        search_repo = populated_factory.get_search_repository()
+        results = await search_repo.keyword_search("", top_k=10)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_partial_match(self, populated_factory):
+        """测试关键词部分匹配"""
+        search_repo = populated_factory.get_search_repository()
+        # 搜索部分词
+        results = await search_repo.keyword_search("SQL", top_k=10)
+        # 应该匹配到包含 "SQLite" 或 "PostgreSQL" 的内容
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_search_regex_fallback_to_keyword(self, populated_factory):
+        """测试 SQLite 的 regex 策略回退到 keyword"""
+        search_repo = populated_factory.get_search_repository()
+        # SQLite 不支持正则，应该回退到 keyword 搜索
+        results = await search_repo.search("DropQA", strategy="regex", top_k=10)
+        assert len(results) >= 1

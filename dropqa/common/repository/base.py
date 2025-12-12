@@ -5,8 +5,12 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
+
+
+# 搜索策略类型
+SearchStrategy = Literal["auto", "fulltext", "keyword", "regex"]
 
 
 @dataclass
@@ -183,11 +187,47 @@ class SearchRepository(ABC):
     """搜索仓库接口"""
 
     @abstractmethod
+    async def search(
+        self,
+        query: str,
+        strategy: SearchStrategy = "auto",
+        top_k: int = 10,
+    ) -> list[SearchResult]:
+        """统一搜索入口
+
+        Args:
+            query: 搜索查询
+            strategy: 搜索策略
+                - "auto": 自动选择（默认等同于 fulltext）
+                - "fulltext": 全文搜索
+                - "keyword": 精确关键词匹配（不区分大小写）
+                - "regex": 正则表达式匹配（仅 PostgreSQL 支持）
+            top_k: 返回结果数量
+
+        Returns:
+            搜索结果列表（关键词匹配优先于全文搜索）
+        """
+        pass
+
+    @abstractmethod
     async def fulltext_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """全文搜索
 
         Args:
             query: 搜索查询
+            top_k: 返回结果数量
+
+        Returns:
+            搜索结果列表
+        """
+        pass
+
+    @abstractmethod
+    async def keyword_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
+        """关键词搜索（精确匹配，不区分大小写）
+
+        Args:
+            query: 搜索关键词
             top_k: 返回结果数量
 
         Returns:

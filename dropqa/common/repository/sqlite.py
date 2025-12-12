@@ -21,6 +21,7 @@ from dropqa.common.repository.base import (
     RepositoryFactory,
     SearchRepository,
     SearchResult,
+    SearchStrategy,
 )
 
 
@@ -268,6 +269,66 @@ class SQLiteSearchRepository(SearchRepository):
 
     def __init__(self, db_path: Path):
         self._db_path = db_path
+
+    async def search(
+        self,
+        query: str,
+        strategy: SearchStrategy = "auto",
+        top_k: int = 10,
+    ) -> list[SearchResult]:
+        """统一搜索入口"""
+        query = query.strip()
+        if not query:
+            return []
+
+        if strategy == "auto" or strategy == "fulltext":
+            return await self.fulltext_search(query, top_k)
+        elif strategy == "keyword":
+            return await self.keyword_search(query, top_k)
+        elif strategy == "regex":
+            # SQLite 不支持正则搜索，回退到关键词搜索
+            return await self.keyword_search(query, top_k)
+        else:
+            return await self.fulltext_search(query, top_k)
+
+    async def keyword_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
+        """关键词搜索（精确匹配，不区分大小写）"""
+        query = query.strip()
+        if not query:
+            return []
+
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            # SQLite 的 LIKE 默认不区分大小写（对 ASCII 字符）
+            # 对于中文，LIKE 本身就是精确匹配
+            sql = """
+                SELECT
+                    n.id,
+                    n.document_id,
+                    n.title,
+                    n.content,
+                    1.0 AS rank
+                FROM nodes n
+                WHERE LOWER(n.title) LIKE LOWER(?) OR LOWER(n.content) LIKE LOWER(?)
+                LIMIT ?
+            """
+
+            pattern = f"%{query}%"
+
+            async with db.execute(sql, (pattern, pattern, top_k)) as cursor:
+                rows = await cursor.fetchall()
+
+            return [
+                SearchResult(
+                    node_id=UUID(row["id"]),
+                    document_id=UUID(row["document_id"]),
+                    title=row["title"],
+                    content=row["content"],
+                    rank=float(row["rank"]),
+                )
+                for row in rows
+            ]
 
     async def fulltext_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         query = query.strip()
