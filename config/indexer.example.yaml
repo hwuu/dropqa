@@ -24,6 +24,9 @@ watch:
     - "~/dropqa_watching"           # 默认监控目录
   extensions:
     - ".md"
+    - ".docx"
+    - ".pptx"
+    - ".xlsx"
 
 # LLM 配置（用于生成摘要、标题增强等）
 # MVP 阶段暂不使用，预留配置

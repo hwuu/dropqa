@@ -80,7 +80,6 @@ Details here.
         """测试 Indexer 初始化"""
         indexer = Indexer(mock_db)
         assert indexer.db == mock_db
-        assert indexer.parser is not None
 
     @pytest.mark.asyncio
     async def test_index_new_file(self, indexer, sample_md_file, mock_db):

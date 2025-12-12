@@ -197,7 +197,7 @@ class TestPostgresSearchRepository:
         query = search_repo._build_tsquery("hello world")
         assert "hello" in query
         assert "world" in query
-        assert "&" in query
+        assert "|" in query  # OR 查询，提高召回率
 
     def test_build_tsquery_chinese(self, factory):
         """测试构建中文查询"""

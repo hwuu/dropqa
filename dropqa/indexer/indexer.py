@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 
 from dropqa.common.db import Database
 from dropqa.common.models import Document, Node
-from dropqa.indexer.parser import MarkdownParser, flatten_nodes
+from dropqa.indexer.parser import flatten_nodes, parse_document
 
 
 def calculate_file_hash(file_path: Path) -> str:
@@ -41,7 +41,6 @@ class Indexer:
             db: 数据库实例
         """
         self.db = db
-        self.parser = MarkdownParser()
 
     async def index_file(self, file_path: Path) -> Document:
         """索引单个文件
@@ -89,7 +88,7 @@ class Indexer:
                 session.add(document)
 
             # 解析文件并创建节点
-            parsed_root = self.parser.parse_file(file_path)
+            parsed_root = parse_document(file_path)
             nodes_data = flatten_nodes(parsed_root, document.id, version=1)
 
             # 批量创建节点

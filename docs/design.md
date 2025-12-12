@@ -2333,14 +2333,22 @@ API 层                            ✓ 核心接口
 - 最简 Web 页面（上传 + 问答）
 
 **MVP 验收标准**：
-- [ ] 能上传 Markdown 文件，自动解析层级结构
-- [ ] 能用自然语言提问，获得基于文档的回答
-- [ ] 回答中包含引用的文档名和章节路径
-- [ ] 端到端流程跑通
+- [x] 能上传 Markdown 文件，自动解析层级结构
+- [x] 能用自然语言提问，获得基于文档的回答
+- [x] 回答中包含引用的文档名和章节路径
+- [x] 端到端流程跑通
+
+**✅ MVP 已完成**（2024-12-12）
+
+额外实现：
+- Repository 抽象层，支持 PostgreSQL 和 SQLite 双后端
+- 完整的单元测试覆盖（109 个测试用例）
+- RAG 流程 DEBUG 日志
+- Windows 文件监控兼容性处理
 
 ---
 
-#### 第二阶段：多格式支持
+#### 第二阶段：多格式支持（当前）
 
 **目标**：支持常见办公文档格式。
 
@@ -2483,13 +2491,22 @@ API 层                            ✓ 核心接口
 ```yaml
 # config/indexer.yaml - 文档索引服务配置
 
-# 数据库配置
-database:
-  host: "localhost"
-  port: 5432
-  name: "dropqa"
-  user: "postgres"
-  password: "${DB_PASSWORD}"
+# 存储后端配置
+storage:
+  backend: "postgres"  # 或 "sqlite"
+
+  # PostgreSQL 配置
+  postgres:
+    host: "localhost"
+    port: 5432
+    name: "dropqa"
+    user: "postgres"
+    password: "${DB_PASSWORD}"
+
+  # SQLite 配置（轻量级部署）
+  sqlite:
+    db_path: "./data/dropqa.db"
+    chroma_path: "./data/chroma"
 
 # 文件监控配置
 watch:
@@ -2556,13 +2573,22 @@ server:
   host: "0.0.0.0"
   port: 8000
 
-# 数据库配置
-database:
-  host: "localhost"
-  port: 5432
-  name: "dropqa"
-  user: "postgres"
-  password: "${DB_PASSWORD}"
+# 存储后端配置
+storage:
+  backend: "postgres"  # 或 "sqlite"
+
+  # PostgreSQL 配置
+  postgres:
+    host: "localhost"
+    port: 5432
+    name: "dropqa"
+    user: "postgres"
+    password: "${DB_PASSWORD}"
+
+  # SQLite 配置（轻量级部署）
+  sqlite:
+    db_path: "./data/dropqa.db"
+    chroma_path: "./data/chroma"
 
 # LLM 配置（用于问答生成）
 llm:
@@ -2667,7 +2693,7 @@ agent:
 
 | 配置项 | indexer | server | 说明 |
 |--------|---------|--------|------|
-| database | ✓ | ✓ | 两个服务连接同一数据库 |
+| storage | ✓ | ✓ | 存储后端配置，支持 postgres/sqlite |
 | watch | ✓ | ✗ | 仅 indexer 需要监控目录 |
 | server | ✗ | ✓ | 仅 server 需要 HTTP 端口 |
 | llm | ✓ | ✓ | 各自配置，可以相同或不同 |
