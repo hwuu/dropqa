@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from dropqa.common.config import create_repository_factory, load_indexer_config
-from dropqa.common.db import Database
 from dropqa.common.embedding import EmbeddingService
 from dropqa.indexer.indexer import Indexer
 from dropqa.indexer.watcher import FileWatcher
@@ -36,23 +35,31 @@ async def main(config_path: str) -> None:
     logger.info(f"加载配置: {config_path}")
     config = load_indexer_config(config_path)
 
-    # 2. 初始化数据库（用于 ORM 操作）
-    pg_config = config.storage.postgres
-    logger.info(f"连接数据库: {pg_config.host}:{pg_config.port}/{pg_config.name}")
-    db = Database(pg_config)
-
-    # 3. 初始化 Repository Factory
+    # 2. 初始化 Repository Factory
     repo_factory = create_repository_factory(config.storage)
     await repo_factory.initialize()
-    search_repo = repo_factory.get_search_repository()
     logger.info(f"存储后端: {config.storage.backend.value}")
 
-    # 4. 初始化 Embedding 服务
-    embedding_service = EmbeddingService(config.embedding)
-    logger.info(f"Embedding 模型: {config.embedding.model}")
+    # 3. 获取 Repository 实例
+    doc_repo = repo_factory.get_document_repository()
+    node_repo = repo_factory.get_node_repository()
+    search_repo = repo_factory.get_search_repository()
+
+    # 4. 初始化 Embedding 服务（可选）
+    embedding_service = None
+    try:
+        embedding_service = EmbeddingService(config.embedding)
+        logger.info(f"Embedding 模型: {config.embedding.model}")
+    except Exception as e:
+        logger.warning(f"Embedding 服务初始化失败，将跳过向量索引: {e}")
 
     # 5. 创建 Indexer 和 FileWatcher
-    indexer = Indexer(db, embedding_service, search_repo)
+    indexer = Indexer(
+        doc_repo=doc_repo,
+        node_repo=node_repo,
+        search_repo=search_repo,
+        embedding_service=embedding_service,
+    )
     watcher = FileWatcher(config.watch, indexer)
 
     # 6. 设置退出信号处理
@@ -85,7 +92,6 @@ async def main(config_path: str) -> None:
         # 9. 清理资源
         watcher.stop()
         await repo_factory.close()
-        await db.close()
         logger.info("Indexer 服务已停止")
 
 

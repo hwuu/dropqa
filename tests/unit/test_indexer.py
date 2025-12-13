@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dropqa.common.repository.base import DocumentData, NodeData
 from dropqa.indexer.indexer import Indexer, calculate_file_hash
 from dropqa.indexer.parser import MarkdownParser
 
@@ -51,16 +52,31 @@ class TestIndexer:
     """Indexer 测试"""
 
     @pytest.fixture
-    def mock_db(self):
-        """创建模拟数据库"""
-        db = MagicMock()
-        db.session = MagicMock(return_value=AsyncMock())
-        return db
+    def mock_doc_repo(self):
+        """创建模拟文档仓库"""
+        repo = AsyncMock()
+        repo.get_by_path = AsyncMock(return_value=None)
+        repo.save = AsyncMock()
+        repo.update = AsyncMock()
+        repo.delete = AsyncMock(return_value=True)
+        repo.get_by_hash = AsyncMock(return_value=None)
+        return repo
 
     @pytest.fixture
-    def indexer(self, mock_db):
+    def mock_node_repo(self):
+        """创建模拟节点仓库"""
+        repo = AsyncMock()
+        repo.save_batch = AsyncMock()
+        repo.delete_by_document = AsyncMock()
+        return repo
+
+    @pytest.fixture
+    def indexer(self, mock_doc_repo, mock_node_repo):
         """创建 Indexer 实例"""
-        return Indexer(mock_db)
+        return Indexer(
+            doc_repo=mock_doc_repo,
+            node_repo=mock_node_repo,
+        )
 
     @pytest.fixture
     def sample_md_file(self, tmp_path):
@@ -76,20 +92,18 @@ Details here.
 """, encoding="utf-8")
         return file
 
-    def test_indexer_init(self, mock_db):
+    def test_indexer_init(self, mock_doc_repo, mock_node_repo):
         """测试 Indexer 初始化"""
-        indexer = Indexer(mock_db)
-        assert indexer.db == mock_db
+        indexer = Indexer(
+            doc_repo=mock_doc_repo,
+            node_repo=mock_node_repo,
+        )
+        assert indexer._doc_repo == mock_doc_repo
+        assert indexer._node_repo == mock_node_repo
 
     @pytest.mark.asyncio
-    async def test_index_new_file(self, indexer, sample_md_file, mock_db):
+    async def test_index_new_file(self, indexer, sample_md_file, mock_doc_repo, mock_node_repo):
         """测试索引新文件"""
-        # 模拟数据库操作
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
-        mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
-
         # 执行索引
         result = await indexer.index_file(sample_md_file)
 
@@ -99,26 +113,58 @@ Details here.
         assert result.file_type == "md"
         assert len(result.file_hash) == 64
 
+        # 验证调用了 save 和 save_batch
+        mock_doc_repo.save.assert_called_once()
+        mock_node_repo.save_batch.assert_called_once()
+
     @pytest.mark.asyncio
-    async def test_index_existing_unchanged_file(self, indexer, sample_md_file, mock_db):
+    async def test_index_existing_unchanged_file(self, indexer, sample_md_file, mock_doc_repo):
         """测试索引已存在且未变化的文件（应跳过）"""
         file_hash = calculate_file_hash(sample_md_file)
+        doc_id = uuid.uuid4()
 
-        # 模拟数据库返回已存在的文档
-        existing_doc = MagicMock()
-        existing_doc.id = uuid.uuid4()
-        existing_doc.file_hash = file_hash
-
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=existing_doc)))
-        mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
+        # 模拟返回已存在的文档
+        existing_doc = DocumentData(
+            id=doc_id,
+            filename="sample.md",
+            file_type="md",
+            file_hash=file_hash,
+            file_size=100,
+            storage_path=str(sample_md_file),
+        )
+        mock_doc_repo.get_by_path.return_value = existing_doc
 
         # 执行索引
         result = await indexer.index_file(sample_md_file)
 
-        # 应返回已存在的文档，不应有新的插入
-        assert result.id == existing_doc.id
+        # 应返回已存在的文档，不应调用 save
+        assert result.id == doc_id
+        mock_doc_repo.save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_index_existing_changed_file(self, indexer, sample_md_file, mock_doc_repo, mock_node_repo):
+        """测试索引已存在但内容变化的文件（应更新）"""
+        doc_id = uuid.uuid4()
+
+        # 模拟返回已存在的文档（但哈希不同）
+        existing_doc = DocumentData(
+            id=doc_id,
+            filename="sample.md",
+            file_type="md",
+            file_hash="old_hash_different_from_current",
+            file_size=100,
+            storage_path=str(sample_md_file),
+        )
+        mock_doc_repo.get_by_path.return_value = existing_doc
+
+        # 执行索引
+        result = await indexer.index_file(sample_md_file)
+
+        # 应更新文档
+        assert result.id == doc_id
+        mock_doc_repo.update.assert_called_once()
+        mock_node_repo.delete_by_document.assert_called_once_with(doc_id)
+        mock_node_repo.save_batch.assert_called_once()
 
     def test_extract_file_type(self, indexer):
         """测试提取文件类型"""
@@ -126,6 +172,47 @@ Details here.
         assert indexer._extract_file_type(Path("test.markdown")) == "markdown"
         assert indexer._extract_file_type(Path("test.MD")) == "md"
         assert indexer._extract_file_type(Path("path/to/file.md")) == "md"
+
+    @pytest.mark.asyncio
+    async def test_delete_document(self, indexer, mock_doc_repo, mock_node_repo):
+        """测试删除文档"""
+        doc_id = uuid.uuid4()
+
+        result = await indexer.delete_document(doc_id)
+
+        assert result is True
+        mock_node_repo.delete_by_document.assert_called_once_with(doc_id)
+        mock_doc_repo.delete.assert_called_once_with(doc_id)
+
+    @pytest.mark.asyncio
+    async def test_delete_document_by_path(self, indexer, mock_doc_repo, mock_node_repo):
+        """测试通过路径删除文档"""
+        doc_id = uuid.uuid4()
+        storage_path = "/path/to/file.md"
+
+        # 模拟 get_by_path 返回文档
+        mock_doc_repo.get_by_path.return_value = DocumentData(
+            id=doc_id,
+            filename="file.md",
+            file_type="md",
+            file_hash="abc123",
+            file_size=100,
+            storage_path=storage_path,
+        )
+
+        result = await indexer.delete_document_by_path(storage_path)
+
+        assert result is True
+        mock_doc_repo.get_by_path.assert_called_once_with(storage_path)
+
+    @pytest.mark.asyncio
+    async def test_delete_document_by_path_not_found(self, indexer, mock_doc_repo):
+        """测试删除不存在的文档"""
+        mock_doc_repo.get_by_path.return_value = None
+
+        result = await indexer.delete_document_by_path("/nonexistent/path.md")
+
+        assert result is False
 
 
 class TestIndexerIntegration:
