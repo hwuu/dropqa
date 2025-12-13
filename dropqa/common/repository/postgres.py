@@ -391,8 +391,47 @@ class PostgresSearchRepository(SearchRepository):
         embedding: list[float],
         top_k: int = 10,
     ) -> list[SearchResult]:
-        # TODO: 实现 pgvector 向量搜索
-        raise NotImplementedError("PostgreSQL 向量搜索尚未实现")
+        """向量搜索（使用 pgvector 余弦相似度）"""
+        if not embedding:
+            return []
+
+        logger.debug(f"[PostgresVector] 向量搜索，维度: {len(embedding)}, top_k: {top_k}")
+
+        # 将向量转换为 PostgreSQL 格式
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+        sql = text("""
+            SELECT
+                n.id,
+                n.document_id,
+                n.title,
+                n.content,
+                1 - (e.embedding <=> :embedding::vector) AS rank
+            FROM embeddings e
+            JOIN nodes n ON e.node_id = n.id
+            ORDER BY e.embedding <=> :embedding::vector
+            LIMIT :top_k
+        """)
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                sql,
+                {"embedding": embedding_str, "top_k": top_k},
+            )
+            rows = result.fetchall()
+
+        logger.debug(f"[PostgresVector] 匹配到 {len(rows)} 条结果")
+
+        return [
+            SearchResult(
+                node_id=row.id,
+                document_id=row.document_id,
+                title=row.title,
+                content=row.content,
+                rank=float(row.rank) if row.rank else 0.0,
+            )
+            for row in rows
+        ]
 
     async def hybrid_search(
         self,
@@ -403,6 +442,63 @@ class PostgresSearchRepository(SearchRepository):
     ) -> list[SearchResult]:
         # TODO: 实现混合搜索
         raise NotImplementedError("PostgreSQL 混合搜索尚未实现")
+
+    async def save_embeddings(
+        self,
+        nodes: list["NodeData"],
+        embeddings: list[list[float]],
+        model_name: str,
+    ) -> None:
+        """保存节点的 embedding"""
+        if not nodes or not embeddings:
+            return
+
+        if len(nodes) != len(embeddings):
+            raise ValueError(f"节点数量 ({len(nodes)}) 与向量数量 ({len(embeddings)}) 不匹配")
+
+        logger.debug(f"[PostgresEmbedding] 保存 {len(nodes)} 个节点的向量")
+
+        async with self._session_factory() as session:
+            for node, embedding in zip(nodes, embeddings):
+                # 将向量转换为 PostgreSQL 格式
+                embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+                # 使用 INSERT ... ON CONFLICT 实现 upsert
+                sql = text("""
+                    INSERT INTO embeddings (id, node_id, embedding, model_name)
+                    VALUES (gen_random_uuid(), :node_id, :embedding::vector, :model_name)
+                    ON CONFLICT (node_id) DO UPDATE SET
+                        embedding = EXCLUDED.embedding,
+                        model_name = EXCLUDED.model_name
+                """)
+
+                await session.execute(
+                    sql,
+                    {
+                        "node_id": str(node.id),
+                        "embedding": embedding_str,
+                        "model_name": model_name,
+                    },
+                )
+
+            await session.commit()
+
+        logger.debug(f"[PostgresEmbedding] 保存完成")
+
+    async def delete_embeddings_by_document(self, document_id: "UUID") -> None:
+        """删除文档的所有 embedding"""
+        logger.debug(f"[PostgresEmbedding] 删除文档 {document_id} 的所有向量")
+
+        sql = text("""
+            DELETE FROM embeddings
+            WHERE node_id IN (
+                SELECT id FROM nodes WHERE document_id = :document_id
+            )
+        """)
+
+        async with self._session_factory() as session:
+            await session.execute(sql, {"document_id": str(document_id)})
+            await session.commit()
 
     def _build_tsquery(self, query: str) -> str:
         """构建 tsquery 查询字符串
@@ -501,6 +597,52 @@ class PostgresRepositoryFactory(RepositoryFactory):
 
         async with self._engine.begin() as conn:
             for stmt in fulltext_statements:
+                await conn.execute(text(stmt))
+
+        # pgvector 初始化语句
+        vector_statements = [
+            # 1. 启用 pgvector 扩展
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            # 2. 添加 embedding 列（如果不存在）
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'embeddings' AND column_name = 'embedding'
+                ) THEN
+                    ALTER TABLE embeddings ADD COLUMN embedding vector;
+                END IF;
+            END $$
+            """,
+            # 3. 添加 node_id 唯一约束（用于 upsert）
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'embeddings_node_id_key'
+                ) THEN
+                    ALTER TABLE embeddings ADD CONSTRAINT embeddings_node_id_key UNIQUE (node_id);
+                END IF;
+            END $$
+            """,
+            # 4. 创建 HNSW 索引（如果不存在）
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE indexname = 'embeddings_embedding_idx'
+                ) THEN
+                    CREATE INDEX embeddings_embedding_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
+                END IF;
+            END $$
+            """,
+        ]
+
+        async with self._engine.begin() as conn:
+            for stmt in vector_statements:
                 await conn.execute(text(stmt))
 
     async def close(self) -> None:

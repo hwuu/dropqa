@@ -811,3 +811,236 @@ class TestSearchStrategy:
         # SQLite 不支持正则，应该回退到 keyword 搜索
         results = await search_repo.search("DropQA", strategy="regex", top_k=10)
         assert len(results) >= 1
+
+
+class TestSQLiteVectorSearch:
+    """SQLite + ChromaDB 向量搜索测试"""
+
+    @pytest.fixture
+    async def factory(self, tmp_path: Path):
+        """创建并初始化测试工厂"""
+        config = SQLiteConfig(
+            db_path=str(tmp_path / "test.db"),
+            chroma_path=str(tmp_path / "chroma"),
+        )
+        factory = SQLiteRepositoryFactory(config)
+        await factory.initialize()
+        return factory
+
+    @pytest.fixture
+    async def populated_factory(self, factory):
+        """创建已有数据的工厂"""
+        doc_repo = factory.get_document_repository()
+        node_repo = factory.get_node_repository()
+
+        # 创建文档
+        doc_id = uuid.uuid4()
+        doc = DocumentData(
+            id=doc_id,
+            filename="test.md",
+            file_type="md",
+            file_hash="abc123",
+            file_size=1024,
+            storage_path="/path/to/test.md",
+        )
+        await doc_repo.save(doc)
+
+        # 创建节点
+        self.node_ids = [uuid.uuid4(), uuid.uuid4()]
+        nodes = [
+            NodeData(
+                id=self.node_ids[0],
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="Python Programming",
+                content="Learn Python programming language basics",
+            ),
+            NodeData(
+                id=self.node_ids[1],
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="Java Programming",
+                content="Learn Java programming language basics",
+            ),
+        ]
+        await node_repo.save_batch(nodes)
+
+        self.doc_id = doc_id
+        self.nodes_data = [
+            NodeData(
+                id=self.node_ids[0],
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="Python Programming",
+                content="Learn Python programming language basics",
+            ),
+            NodeData(
+                id=self.node_ids[1],
+                document_id=doc_id,
+                parent_id=None,
+                node_type="heading",
+                depth=1,
+                title="Java Programming",
+                content="Learn Java programming language basics",
+            ),
+        ]
+
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_save_embeddings(self, populated_factory):
+        """测试保存 embeddings 到 ChromaDB"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 生成测试向量（384 维）
+        embeddings = [
+            [0.1] * 384,  # Python 节点的向量
+            [0.2] * 384,  # Java 节点的向量
+        ]
+
+        # 保存 embeddings
+        await search_repo.save_embeddings(
+            self.nodes_data,
+            embeddings,
+            "test-model",
+        )
+
+        # 验证通过向量搜索能找到结果
+        results = await search_repo.vector_search(
+            embedding=[0.1] * 384,
+            top_k=2,
+        )
+        assert len(results) > 0
+
+    @pytest.mark.asyncio
+    async def test_vector_search_returns_similar_results(self, populated_factory):
+        """测试向量搜索返回相似结果"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 保存不同的向量
+        embeddings = [
+            [1.0, 0.0, 0.0] + [0.0] * 381,  # Python 节点 - 更接近查询
+            [0.0, 1.0, 0.0] + [0.0] * 381,  # Java 节点 - 较远
+        ]
+
+        await search_repo.save_embeddings(
+            self.nodes_data,
+            embeddings,
+            "test-model",
+        )
+
+        # 搜索与 Python 节点相似的向量
+        query_embedding = [1.0, 0.0, 0.0] + [0.0] * 381
+        results = await search_repo.vector_search(
+            embedding=query_embedding,
+            top_k=2,
+        )
+
+        assert len(results) == 2
+        # 第一个结果应该是 Python（最相似）
+        assert results[0].node_id == self.node_ids[0]
+        # rank 应该是相似度（1 - distance）
+        assert results[0].rank > results[1].rank
+
+    @pytest.mark.asyncio
+    async def test_vector_search_empty_embedding(self, populated_factory):
+        """测试空向量搜索"""
+        search_repo = populated_factory.get_search_repository()
+        results = await search_repo.vector_search(embedding=[], top_k=10)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_delete_embeddings_by_document(self, populated_factory):
+        """测试删除文档的所有 embeddings"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 先保存 embeddings
+        embeddings = [
+            [0.1] * 384,
+            [0.2] * 384,
+        ]
+        await search_repo.save_embeddings(
+            self.nodes_data,
+            embeddings,
+            "test-model",
+        )
+
+        # 删除文档的 embeddings
+        await search_repo.delete_embeddings_by_document(self.doc_id)
+
+        # 验证 embeddings 已删除（搜索应该返回空）
+        results = await search_repo.vector_search(
+            embedding=[0.1] * 384,
+            top_k=2,
+        )
+        assert len(results) == 0
+
+    @pytest.mark.asyncio
+    async def test_save_embeddings_upsert(self, populated_factory):
+        """测试 upsert 更新已有的 embeddings"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 第一次保存
+        embeddings_v1 = [
+            [0.1] * 384,
+            [0.2] * 384,
+        ]
+        await search_repo.save_embeddings(
+            self.nodes_data,
+            embeddings_v1,
+            "test-model",
+        )
+
+        # 第二次保存（upsert 更新）
+        embeddings_v2 = [
+            [0.9] * 384,  # 更新为不同的值
+            [0.8] * 384,
+        ]
+        await search_repo.save_embeddings(
+            self.nodes_data,
+            embeddings_v2,
+            "test-model-v2",
+        )
+
+        # 搜索应该找到新的向量
+        results = await search_repo.vector_search(
+            embedding=[0.9] * 384,
+            top_k=2,
+        )
+        assert len(results) > 0
+        # 第一个结果的 rank 应该很高（接近 1.0）
+        assert results[0].rank > 0.9
+
+    @pytest.mark.asyncio
+    async def test_save_embeddings_mismatched_count(self, populated_factory):
+        """测试节点数量与向量数量不匹配时报错"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 只提供一个向量，但有两个节点
+        embeddings = [
+            [0.1] * 384,
+        ]
+
+        with pytest.raises(ValueError, match="不匹配"):
+            await search_repo.save_embeddings(
+                self.nodes_data,
+                embeddings,
+                "test-model",
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_embeddings_empty_input(self, populated_factory):
+        """测试空输入不报错"""
+        search_repo = populated_factory.get_search_repository()
+
+        # 空节点列表
+        await search_repo.save_embeddings([], [], "test-model")
+
+        # 空向量列表
+        await search_repo.save_embeddings([], [], "test-model")

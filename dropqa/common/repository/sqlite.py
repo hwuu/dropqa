@@ -265,10 +265,11 @@ class SQLiteNodeRepository(NodeRepository):
 
 
 class SQLiteSearchRepository(SearchRepository):
-    """SQLite 搜索仓库（使用 FTS5）"""
+    """SQLite 搜索仓库（使用 FTS5 + ChromaDB）"""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, get_chroma_collection=None):
         self._db_path = db_path
+        self._get_chroma_collection = get_chroma_collection
 
     async def search(
         self,
@@ -376,8 +377,44 @@ class SQLiteSearchRepository(SearchRepository):
         embedding: list[float],
         top_k: int = 10,
     ) -> list[SearchResult]:
-        # TODO: 集成 ChromaDB 实现向量搜索
-        raise NotImplementedError("SQLite 向量搜索需要集成 ChromaDB")
+        """向量搜索（使用 ChromaDB）"""
+        if not embedding:
+            return []
+
+        if self._get_chroma_collection is None:
+            raise NotImplementedError("SQLite 向量搜索需要配置 ChromaDB")
+
+        collection = self._get_chroma_collection()
+
+        # ChromaDB 查询
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        # 转换结果
+        search_results = []
+        if results and results["ids"] and results["ids"][0]:
+            ids = results["ids"][0]
+            documents = results["documents"][0] if results["documents"] else [None] * len(ids)
+            metadatas = results["metadatas"][0] if results["metadatas"] else [{}] * len(ids)
+            distances = results["distances"][0] if results["distances"] else [0.0] * len(ids)
+
+            for i, node_id in enumerate(ids):
+                metadata = metadatas[i] if i < len(metadatas) else {}
+                # ChromaDB 返回的是距离，转换为相似度（余弦距离: similarity = 1 - distance）
+                similarity = 1 - distances[i] if i < len(distances) else 0.0
+
+                search_results.append(SearchResult(
+                    node_id=UUID(node_id),
+                    document_id=UUID(metadata.get("document_id", node_id)),
+                    title=metadata.get("title"),
+                    content=documents[i] if i < len(documents) else None,
+                    rank=similarity,
+                ))
+
+        return search_results
 
     async def hybrid_search(
         self,
@@ -388,6 +425,58 @@ class SQLiteSearchRepository(SearchRepository):
     ) -> list[SearchResult]:
         # TODO: 实现混合搜索
         raise NotImplementedError("SQLite 混合搜索尚未实现")
+
+    async def save_embeddings(
+        self,
+        nodes: list["NodeData"],
+        embeddings: list[list[float]],
+        model_name: str,
+    ) -> None:
+        """保存节点的 embedding 到 ChromaDB"""
+        if not nodes or not embeddings:
+            return
+
+        if len(nodes) != len(embeddings):
+            raise ValueError(f"节点数量 ({len(nodes)}) 与向量数量 ({len(embeddings)}) 不匹配")
+
+        if self._get_chroma_collection is None:
+            raise NotImplementedError("SQLite embedding 保存需要配置 ChromaDB")
+
+        collection = self._get_chroma_collection()
+
+        # 准备数据
+        ids = [str(node.id) for node in nodes]
+        documents = [f"{node.title or ''}\n{node.content or ''}".strip() for node in nodes]
+        metadatas = [
+            {
+                "document_id": str(node.document_id),
+                "title": node.title or "",
+                "node_type": node.node_type,
+                "depth": node.depth,
+                "model_name": model_name,
+            }
+            for node in nodes
+        ]
+
+        # ChromaDB upsert
+        collection.upsert(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
+
+    async def delete_embeddings_by_document(self, document_id: "UUID") -> None:
+        """删除文档的所有 embedding"""
+        if self._get_chroma_collection is None:
+            raise NotImplementedError("SQLite embedding 删除需要配置 ChromaDB")
+
+        collection = self._get_chroma_collection()
+
+        # ChromaDB 按 metadata 条件删除
+        collection.delete(
+            where={"document_id": str(document_id)}
+        )
 
     def _build_fts_query(self, query: str) -> str:
         """构建 FTS5 查询字符串
@@ -414,9 +503,30 @@ class SQLiteRepositoryFactory(RepositoryFactory):
     def __init__(self, config: SQLiteConfig):
         self._config = config
         self._db_path = config.get_db_path()
+        self._chroma_path = config.get_chroma_path()
+
+        # 初始化 ChromaDB
+        self._chroma_client = None
+        self._chroma_collection = None
+
         self._document_repo = SQLiteDocumentRepository(self._db_path)
         self._node_repo = SQLiteNodeRepository(self._db_path)
-        self._search_repo = SQLiteSearchRepository(self._db_path)
+        self._search_repo = SQLiteSearchRepository(self._db_path, self._get_chroma_collection)
+
+    def _get_chroma_collection(self):
+        """懒加载 ChromaDB collection"""
+        if self._chroma_collection is None:
+            try:
+                import chromadb
+                self._chroma_path.parent.mkdir(parents=True, exist_ok=True)
+                self._chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
+                self._chroma_collection = self._chroma_client.get_or_create_collection(
+                    name="nodes",
+                    metadata={"hnsw:space": "cosine"}
+                )
+            except ImportError:
+                raise ImportError("ChromaDB 未安装。请运行: pip install chromadb")
+        return self._chroma_collection
 
     def get_document_repository(self) -> DocumentRepository:
         return self._document_repo

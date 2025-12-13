@@ -273,6 +273,31 @@ class SearchRepository(ABC):
         """
         pass
 
+    @abstractmethod
+    async def save_embeddings(
+        self,
+        nodes: list[NodeData],
+        embeddings: list[list[float]],
+        model_name: str,
+    ) -> None:
+        """保存节点的 embedding
+
+        Args:
+            nodes: 节点数据列表
+            embeddings: 对应的向量列表
+            model_name: 使用的模型名称
+        """
+        pass
+
+    @abstractmethod
+    async def delete_embeddings_by_document(self, document_id: UUID) -> None:
+        """删除文档的所有 embedding
+
+        Args:
+            document_id: 文档 ID
+        """
+        pass
+
 
 class RepositoryFactory(ABC):
     """仓库工厂接口"""

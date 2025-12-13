@@ -11,8 +11,9 @@ import signal
 import sys
 from pathlib import Path
 
-from dropqa.common.config import load_indexer_config
+from dropqa.common.config import create_repository_factory, load_indexer_config
 from dropqa.common.db import Database
+from dropqa.common.embedding import EmbeddingService
 from dropqa.indexer.indexer import Indexer
 from dropqa.indexer.watcher import FileWatcher
 
@@ -35,17 +36,26 @@ async def main(config_path: str) -> None:
     logger.info(f"加载配置: {config_path}")
     config = load_indexer_config(config_path)
 
-    # 2. 初始化数据库
-    # 使用 storage.postgres 配置（新格式）
+    # 2. 初始化数据库（用于 ORM 操作）
     pg_config = config.storage.postgres
     logger.info(f"连接数据库: {pg_config.host}:{pg_config.port}/{pg_config.name}")
     db = Database(pg_config)
 
-    # 3. 创建 Indexer 和 FileWatcher
-    indexer = Indexer(db)
+    # 3. 初始化 Repository Factory
+    repo_factory = create_repository_factory(config.storage)
+    await repo_factory.initialize()
+    search_repo = repo_factory.get_search_repository()
+    logger.info(f"存储后端: {config.storage.backend.value}")
+
+    # 4. 初始化 Embedding 服务
+    embedding_service = EmbeddingService(config.embedding)
+    logger.info(f"Embedding 模型: {config.embedding.model}")
+
+    # 5. 创建 Indexer 和 FileWatcher
+    indexer = Indexer(db, embedding_service, search_repo)
     watcher = FileWatcher(config.watch, indexer)
 
-    # 4. 设置退出信号处理
+    # 6. 设置退出信号处理
     stop_event = asyncio.Event()
 
     def signal_handler():
@@ -62,18 +72,19 @@ async def main(config_path: str) -> None:
         signal.signal(signal.SIGINT, lambda s, f: signal_handler())
 
     try:
-        # 5. 启动监控
+        # 7. 启动监控
         await watcher.start()
         logger.info("Indexer 服务已启动，按 Ctrl+C 退出")
 
-        # 6. 等待退出信号
+        # 8. 等待退出信号
         await stop_event.wait()
 
     except KeyboardInterrupt:
         logger.info("收到键盘中断")
     finally:
-        # 7. 清理资源
+        # 9. 清理资源
         watcher.stop()
+        await repo_factory.close()
         await db.close()
         logger.info("Indexer 服务已停止")
 

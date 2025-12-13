@@ -106,3 +106,33 @@ class Node(Base):
 
     def __repr__(self) -> str:
         return f"<Node(id={self.id}, type={self.node_type}, title={self.title})>"
+
+
+class Embedding(Base):
+    """向量嵌入表"""
+    __tablename__ = "embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nodes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # embedding 列使用原生 SQL 创建，因为 pgvector 类型需要动态维度
+    # 在 PostgresRepositoryFactory.initialize() 中通过 ALTER TABLE 添加
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # 关系
+    node: Mapped["Node"] = relationship("Node")
+
+    def __repr__(self) -> str:
+        return f"<Embedding(id={self.id}, node_id={self.node_id}, model={self.model_name})>"
