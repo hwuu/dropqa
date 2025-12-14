@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dropqa.common.config import ServerAppConfig, create_repository_factory
+from dropqa.common.embedding import EmbeddingService
 from dropqa.server.llm import LLMService
 from dropqa.server.qa import QAService
 from dropqa.server.search import SearchService
@@ -63,10 +64,19 @@ def create_app(config: ServerAppConfig) -> FastAPI:
             repo_factory.get_node_repository(),
         )
         llm_service = LLMService(config.llm)
+
+        # 初始化 Embedding 服务（用于混合搜索）
+        embedding_service = None
+        if config.agentic.enabled and config.agentic.hybrid_search.enabled:
+            embedding_service = EmbeddingService(config.embedding)
+
+        # 初始化 QA 服务
         qa_service = QAService(
             search_service,
             llm_service,
             top_k=config.retrieval.top_k,
+            agentic_config=config.agentic,
+            embedding_service=embedding_service,
         )
         app.state.qa_service = qa_service
 

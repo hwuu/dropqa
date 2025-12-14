@@ -4,6 +4,9 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from dropqa.common.embedding import EmbeddingService
+from dropqa.server.agentic.config import AgenticConfig
+from dropqa.server.agentic.pipeline import AgenticRAGPipeline
 from dropqa.server.llm import LLMService
 from dropqa.server.search import SearchService, NodeContext
 
@@ -56,6 +59,7 @@ class QAService:
     """问答服务
 
     整合搜索和 LLM 实现 RAG 问答。
+    支持简单 RAG 和 Agentic RAG 两种模式。
     """
 
     def __init__(
@@ -64,6 +68,8 @@ class QAService:
         llm_service: LLMService,
         top_k: int = 5,
         max_context_length: int = 3000,
+        agentic_config: Optional[AgenticConfig] = None,
+        embedding_service: Optional[EmbeddingService] = None,
     ):
         """初始化问答服务
 
@@ -72,11 +78,28 @@ class QAService:
             llm_service: LLM 服务
             top_k: 检索文档数量
             max_context_length: 单个上下文最大长度
+            agentic_config: Agentic RAG 配置（可选）
+            embedding_service: Embedding 服务（可选，用于混合搜索）
         """
         self.search_service = search_service
         self.llm_service = llm_service
         self.top_k = top_k
         self.max_context_length = max_context_length
+        self.agentic_config = agentic_config
+        self.embedding_service = embedding_service
+
+        # 初始化 Agentic Pipeline（如果启用）
+        self._agentic_pipeline: Optional[AgenticRAGPipeline] = None
+        if agentic_config and agentic_config.enabled:
+            self._agentic_pipeline = AgenticRAGPipeline(
+                config=agentic_config,
+                search_service=search_service,
+                llm_service=llm_service,
+                embedding_service=embedding_service,
+            )
+            logger.info("[QA] Agentic RAG 模式已启用")
+        else:
+            logger.info("[QA] 使用简单 RAG 模式")
 
     async def ask(self, question: str) -> QAResponse:
         """问答
@@ -94,6 +117,59 @@ class QAService:
                 sources=[],
             )
 
+        # 根据配置选择 RAG 模式
+        if self._agentic_pipeline:
+            return await self._ask_agentic(question)
+        else:
+            return await self._ask_simple(question)
+
+    async def _ask_agentic(self, question: str) -> QAResponse:
+        """Agentic RAG 问答
+
+        使用查询改写、混合搜索、多轮检索、结果重排序。
+        """
+        logger.debug(f"[AgenticRAG] 开始处理问题: {question}")
+
+        # 执行 Agentic Pipeline
+        result = await self._agentic_pipeline.run(question)
+
+        # 检查是否有结果
+        if not result.ranked_results:
+            logger.debug("[AgenticRAG] 无搜索结果，返回默认回答")
+            answer = await self.llm_service.chat([
+                {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
+            ])
+            return QAResponse(answer=answer, sources=[])
+
+        # 使用重排序后的上下文
+        contexts = [r.context for r in result.ranked_results]
+        logger.debug(f"[AgenticRAG] 使用 {len(contexts)} 条重排序后的上下文")
+
+        # 打印重排序结果
+        for i, ranked in enumerate(result.ranked_results, 1):
+            logger.debug(
+                f"[AgenticRAG] 结果 {i}: "
+                f"score={ranked.score:.1f}, "
+                f"doc={ranked.context.document_name}, "
+                f"reason={ranked.reason or 'N/A'}"
+            )
+
+        # 构建 Prompt 并调用 LLM
+        prompt = self._build_context_prompt(contexts, question)
+        answer = await self.llm_service.chat([
+            {"role": "user", "content": prompt}
+        ])
+
+        # 构建来源引用
+        sources = self._build_sources(contexts)
+
+        return QAResponse(answer=answer, sources=sources)
+
+    async def _ask_simple(self, question: str) -> QAResponse:
+        """简单 RAG 问答
+
+        原有的简单 RAG 流程。
+        """
         logger.debug(f"[RAG] 开始处理问题: {question}")
 
         # 1. 搜索相关文档

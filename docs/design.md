@@ -26,6 +26,8 @@
   - [6.4 执行框架](#64-执行框架)
   - [6.5 标准 RAG 流程](#65-标准-rag-流程)
   - [6.6 响应格式](#66-响应格式)
+  - [6.7 实现详情](#67-实现详情)
+    - [6.7.8 召回质量优化](#678-召回质量优化)
 - [7. 接口设计](#7-接口设计)
   - [7.1 后端 API](#71-后端-api)
   - [7.2 前端页面](#72-前端页面)
@@ -1939,6 +1941,208 @@ def build_breadcrumb(node) -> list:
 }
 ```
 
+### 6.7 实现详情
+
+本节描述 Agentic RAG 系统的实际代码实现。
+
+#### 6.7.1 模块结构
+
+```
+dropqa/server/agentic/
+├── __init__.py           # 模块导出
+├── config.py             # 配置模型 (Pydantic)
+├── pipeline.py           # AgenticRAGPipeline 流程编排
+├── query_rewriter.py     # 查询改写
+├── reranker.py           # 结果重排序
+└── prompts.py            # Prompt 模板
+```
+
+#### 6.7.2 配置模型
+
+```python
+class AgenticConfig(BaseModel):
+    """Agentic RAG 主配置"""
+    enabled: bool = False           # 总开关，默认关闭保持向后兼容
+    top_k: int = 10                 # 检索数量
+
+    query_rewrite: QueryRewriteConfig    # 查询改写配置
+    hybrid_search: HybridSearchConfig    # 混合搜索配置
+    multi_round: MultiRoundConfig        # 多轮检索配置
+    rerank: RerankConfig                 # 重排序配置
+
+
+class HybridSearchConfig(BaseModel):
+    """混合搜索配置"""
+    enabled: bool = True
+    fulltext_weight: float = 0.5    # 全文搜索权重 (0.0-1.0)
+    # semantic_weight = 1.0 - fulltext_weight
+```
+
+#### 6.7.3 混合搜索算法
+
+使用 RRF (Reciprocal Rank Fusion) 算法合并全文搜索和向量搜索结果：
+
+```
+RRF Score = Σ (weight × (1 / (k + rank + 1)))
+
+where:
+  k = 60 (smoothing constant)
+  rank = 0-based position in result list
+  weight = fulltext_weight or (1 - fulltext_weight)
+```
+
+实现流程：
+
+```
++------------------+     +------------------+
+| Fulltext Search  |     | Vector Search    |
+| (PostgreSQL FTS) |     | (pgvector)       |
++------------------+     +------------------+
+         |                        |
+         v                        v
++------------------+     +------------------+
+| Rank: 0, 1, 2... |     | Rank: 0, 1, 2... |
++------------------+     +------------------+
+         |                        |
+         +------------------------+
+                    |
+                    v
+         +------------------+
+         | RRF Merge        |
+         | Score by node_id |
+         +------------------+
+                    |
+                    v
+         +------------------+
+         | Sort by Score    |
+         | Return top_k     |
+         +------------------+
+```
+
+#### 6.7.4 查询改写
+
+使用 LLM 将用户问题改写为适合不同搜索策略的查询：
+
+```python
+@dataclass
+class RewrittenQuery:
+    keywords: list[str]       # 关键词列表（用于关键词搜索）
+    fulltext_query: str       # 全文搜索查询
+    semantic_query: str       # 语义搜索查询
+```
+
+Prompt 设计要点：
+- 输出 JSON 格式，便于解析
+- 包含示例，引导 LLM 输出正确格式
+- 区分三种查询类型的适用场景
+
+#### 6.7.5 结果重排序
+
+使用 LLM 对检索结果进行相关性评分和重排序：
+
+```python
+@dataclass
+class RankedResult:
+    context: NodeContext      # 原始上下文
+    score: float              # 相关性分数 (0-10)
+    reason: str | None        # 评分理由
+```
+
+重排序逻辑：
+1. 空结果或单个结果直接返回
+2. 构建 LLM 评分 Prompt，包含问题和所有候选结果
+3. LLM 输出每个结果的分数和理由
+4. 按分数降序排序，返回 top_k 个结果
+5. 异常时回退到原始顺序
+
+#### 6.7.6 Pipeline 流程
+
+```python
+class AgenticRAGPipeline:
+    async def run(self, question: str) -> AgenticRAGResult:
+        # 1. Query Rewrite (if enabled)
+        rewritten_query = await self._query_rewriter.rewrite(question)
+
+        # 2. Hybrid Search (or fulltext only)
+        contexts = await self._execute_search(
+            rewritten_query.fulltext_query,
+            rewritten_query.semantic_query
+        )
+
+        # 3. Multi-Round Retrieval (if enabled and results insufficient)
+        if len(contexts) < threshold:
+            additional = await self._supplementary_search(question, contexts)
+            contexts = self._merge_contexts(contexts, additional)
+
+        # 4. Rerank (if enabled)
+        ranked_results = await self._reranker.rerank(question, contexts)
+
+        return AgenticRAGResult(
+            question=question,
+            rewritten_query=rewritten_query,
+            contexts=contexts,
+            ranked_results=ranked_results
+        )
+```
+
+#### 6.7.7 向后兼容
+
+通过 `agentic.enabled` 总开关控制：
+
+```python
+# dropqa/server/qa.py
+class QAService:
+    async def ask(self, question):
+        if self.agentic_config.enabled:
+            # 走 Agentic RAG 流程
+            return await self._ask_agentic(question)
+        else:
+            # 走原有简单 RAG 流程
+            return await self._ask_simple(question)
+```
+
+默认 `enabled: false`，确保不影响现有功能。
+
+#### 6.7.8 召回质量优化
+
+为解决 FTS5 搜索对大小写敏感、标题节点召回不足的问题，实现了多层召回策略：
+
+**问题背景**：
+- FTS5 的 `unicode61` tokenizer 对大小写敏感
+- 用户搜索 "dbdiag" 无法匹配标题中的 "DBDiag"
+- 标题节点的 `content` 为空，仅 `title` 字段有信息
+
+**解决方案**：
+
+1. **双重搜索策略**（`fulltext_search` 方法）
+
+```
++------------------+     +------------------+
+| FTS5 全文搜索    |     | Title LIKE 搜索  |
+| (BM25 排序)      |     | (大小写不敏感)   |
++------------------+     +------------------+
+         |                        |
+         +------------------------+
+                    |
+                    v
+         +------------------+
+         | 合并去重         |
+         | 按 rank 排序     |
+         +------------------+
+```
+
+2. **关键词提取**（`_extract_keywords` 方法）
+   - 过滤常见疑问词（"是什么"、"怎么"、"如何"等）
+   - 保留实质性关键词用于标题搜索
+
+3. **Reranker 空内容处理**（`_build_candidates_text` 方法）
+   - 当节点 `content` 为空时，使用 `[标题节点] {path}` 作为内容提示
+   - 确保 LLM 能看到标题信息并正确评分
+
+**实现位置**：
+- `dropqa/common/repository/sqlite.py`: `fulltext_search`, `_title_search`, `_extract_keywords`
+- `dropqa/server/agentic/reranker.py`: `_build_candidates_text`
+
 ---
 
 ## 7. 接口设计
@@ -2392,15 +2596,20 @@ API 层                            ✓ 核心接口
 - 向量索引构建
 - 搜索策略自动选择
 
-**10. Agentic RAG**
-- Agent 工具集实现
-  - 搜索工具（keyword_search, fulltext_search, semantic_search）
-  - 浏览工具（get_node_content, get_section_children, get_document_structure）
-  - 关联工具（get_related_documents）
-  - 分析工具（verify_consistency, summarize_findings）
-  - 终止工具（final_answer）
-- Agent 控制器（推理循环）
-- 反馈评估与策略调整
+**10. Agentic RAG** ✅ 已完成（2024-12-14）
+- 查询改写 (Query Rewriter)
+  - LLM 将问题改写为关键词、全文查询、语义查询三种形式
+- 混合搜索 (Hybrid Search)
+  - RRF (Reciprocal Rank Fusion) 算法合并全文和向量搜索结果
+  - 可配置权重（默认 0.5:0.5）
+- 多轮检索 (Multi-Round Retrieval)
+  - 结果不足时自动补充检索
+- 结果重排序 (Reranker)
+  - LLM 评估相关性分数并重排序
+- Pipeline 集成
+  - AgenticRAGPipeline 统一编排
+  - 向后兼容（enabled=false 时走原有简单 RAG）
+- 单元测试覆盖（34 个新测试用例）
 
 **11. 话题管理**
 - 话题自动提取

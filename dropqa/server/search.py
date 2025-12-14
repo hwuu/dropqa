@@ -96,6 +96,75 @@ class SearchService:
             for r in results
         ]
 
+    async def vector_search(
+        self,
+        embedding: list[float],
+        top_k: int = 10,
+    ) -> list[SearchResult]:
+        """向量搜索
+
+        Args:
+            embedding: 查询向量
+            top_k: 返回结果数量
+
+        Returns:
+            搜索结果列表，按相似度降序排列
+        """
+        logger.debug(f"[Search] 向量搜索: dim={len(embedding)}, top_k={top_k}")
+        results = await self._search_repo.vector_search(embedding, top_k)
+        logger.debug(f"[Search] 返回 {len(results)} 条结果")
+
+        return [
+            SearchResult(
+                node_id=r.node_id,
+                document_id=r.document_id,
+                title=r.title,
+                content=r.content,
+                rank=r.rank,
+            )
+            for r in results
+        ]
+
+    async def hybrid_search(
+        self,
+        query: str,
+        embedding: list[float],
+        top_k: int = 10,
+        fulltext_weight: float = 0.5,
+    ) -> list[SearchResult]:
+        """混合搜索（全文 + 向量）
+
+        使用 RRF 算法合并全文搜索和向量搜索结果。
+
+        Args:
+            query: 文本查询
+            embedding: 查询向量
+            top_k: 返回结果数量
+            fulltext_weight: 全文搜索权重 (0.0-1.0)
+
+        Returns:
+            搜索结果列表，按综合相关度降序排列
+        """
+        logger.debug(
+            f"[Search] 混合搜索: query='{query}', dim={len(embedding)}, "
+            f"top_k={top_k}, fulltext_weight={fulltext_weight}"
+        )
+        results = await self._search_repo.hybrid_search(
+            query, embedding, top_k, fulltext_weight
+        )
+        logger.debug(f"[Search] 返回 {len(results)} 条结果")
+
+        return [
+            SearchResult(
+                node_id=r.node_id,
+                document_id=r.document_id,
+                title=r.title,
+                content=r.content,
+                rank=r.rank,
+            )
+            for r in results
+        ]
+
     async def get_node_context(self, node_id: uuid.UUID) -> Optional[NodeContext]:
         """获取节点上下文（包含面包屑）
 

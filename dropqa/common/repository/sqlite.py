@@ -332,14 +332,42 @@ class SQLiteSearchRepository(SearchRepository):
             ]
 
     async def fulltext_search(self, query: str, top_k: int = 10) -> list[SearchResult]:
+        """全文搜索（FTS5 + 标题 LIKE 补充）
+
+        结合 FTS5 全文搜索和标题 LIKE 搜索，确保标题节点能被召回。
+        """
         query = query.strip()
         if not query:
             return []
 
-        fts_query = self._build_fts_query(query)
-        if not fts_query:
-            return []
+        results: list[SearchResult] = []
+        seen_ids: set[UUID] = set()
 
+        # 1. FTS5 全文搜索
+        fts_query = self._build_fts_query(query)
+        if fts_query:
+            fts_results = await self._fts_search(fts_query, top_k)
+            for r in fts_results:
+                if r.node_id not in seen_ids:
+                    results.append(r)
+                    seen_ids.add(r.node_id)
+
+        # 2. 标题 LIKE 搜索（补充 FTS 可能遗漏的标题匹配）
+        # 提取主要关键词（过滤掉常见疑问词）
+        keywords = self._extract_keywords(query)
+        if keywords:
+            title_results = await self._title_search(keywords, top_k)
+            for r in title_results:
+                if r.node_id not in seen_ids:
+                    results.append(r)
+                    seen_ids.add(r.node_id)
+
+        # 按 rank 排序，返回 top_k
+        results.sort(key=lambda x: x.rank, reverse=True)
+        return results[:top_k]
+
+    async def _fts_search(self, fts_query: str, top_k: int) -> list[SearchResult]:
+        """FTS5 全文搜索"""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
@@ -371,6 +399,62 @@ class SQLiteSearchRepository(SearchRepository):
                 )
                 for row in rows
             ]
+
+    async def _title_search(self, keywords: list[str], top_k: int) -> list[SearchResult]:
+        """标题 LIKE 搜索（大小写不敏感）
+
+        用于补充 FTS 可能遗漏的标题匹配，特别是处理大小写不一致的情况。
+        """
+        if not keywords:
+            return []
+
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            # 构建 OR 条件：任意关键词匹配标题即可
+            conditions = " OR ".join("LOWER(n.title) LIKE LOWER(?)" for _ in keywords)
+            patterns = [f"%{kw}%" for kw in keywords]
+
+            sql = f"""
+                SELECT
+                    n.id,
+                    n.document_id,
+                    n.title,
+                    n.content,
+                    10.0 AS rank
+                FROM nodes n
+                WHERE ({conditions}) AND n.title IS NOT NULL
+                LIMIT ?
+            """
+
+            async with db.execute(sql, (*patterns, top_k)) as cursor:
+                rows = await cursor.fetchall()
+
+            return [
+                SearchResult(
+                    node_id=UUID(row["id"]),
+                    document_id=UUID(row["document_id"]),
+                    title=row["title"],
+                    content=row["content"],
+                    rank=float(row["rank"]),
+                )
+                for row in rows
+            ]
+
+    def _extract_keywords(self, query: str) -> list[str]:
+        """从查询中提取主要关键词（过滤常见疑问词）"""
+        # 常见的中文疑问词/停用词
+        stopwords = {"是什么", "什么", "怎么", "如何", "为什么", "哪些", "哪个", "有哪些", "是", "的", "吗", "呢"}
+
+        # 清理并分词
+        cleaned = re.sub(r"[^\w\u4e00-\u9fff\s]", " ", query)
+        words = cleaned.split()
+        words = [w.strip() for w in words if w.strip()]
+
+        # 过滤停用词，保留实质性关键词
+        keywords = [w for w in words if w not in stopwords and len(w) > 1]
+
+        return keywords
 
     async def vector_search(
         self,
@@ -423,8 +507,116 @@ class SQLiteSearchRepository(SearchRepository):
         top_k: int = 10,
         fulltext_weight: float = 0.5,
     ) -> list[SearchResult]:
-        # TODO: 实现混合搜索
-        raise NotImplementedError("SQLite 混合搜索尚未实现")
+        """混合搜索（全文 + 向量）
+
+        使用 RRF (Reciprocal Rank Fusion) 算法合并全文搜索和向量搜索结果。
+        RRF 公式: score = w1 * (1 / (k + rank1)) + w2 * (1 / (k + rank2))
+        其中 k 是常数（通常为 60），用于减轻排名靠后的影响。
+
+        Args:
+            query: 文本查询
+            embedding: 查询向量
+            top_k: 返回结果数量
+            fulltext_weight: 全文搜索权重 (0.0-1.0)
+
+        Returns:
+            搜索结果列表
+        """
+        vector_weight = 1.0 - fulltext_weight
+
+        # 并行执行两种搜索，获取更多候选结果用于合并
+        candidate_k = top_k * 2
+
+        # 执行全文搜索
+        fulltext_results = []
+        if fulltext_weight > 0:
+            fulltext_results = await self.fulltext_search(query, candidate_k)
+
+        # 执行向量搜索
+        vector_results = []
+        if vector_weight > 0 and embedding:
+            try:
+                vector_results = await self.vector_search(embedding, candidate_k)
+            except NotImplementedError:
+                # 如果向量搜索不可用，回退到纯全文搜索
+                pass
+
+        # 如果只有一种搜索有结果，直接返回
+        if not fulltext_results and not vector_results:
+            return []
+        if not fulltext_results:
+            return vector_results[:top_k]
+        if not vector_results:
+            return fulltext_results[:top_k]
+
+        # 使用 RRF 合并结果
+        return self._rrf_merge(
+            fulltext_results,
+            vector_results,
+            fulltext_weight,
+            vector_weight,
+            top_k,
+        )
+
+    def _rrf_merge(
+        self,
+        list1: list[SearchResult],
+        list2: list[SearchResult],
+        weight1: float,
+        weight2: float,
+        top_k: int,
+        k: int = 60,
+    ) -> list[SearchResult]:
+        """RRF (Reciprocal Rank Fusion) 合并两个排序列表
+
+        Args:
+            list1: 第一个搜索结果列表
+            list2: 第二个搜索结果列表
+            weight1: 第一个列表的权重
+            weight2: 第二个列表的权重
+            top_k: 返回结果数量
+            k: RRF 常数，用于平滑排名
+
+        Returns:
+            合并后的搜索结果列表
+        """
+        # 计算 RRF 分数
+        scores: dict[UUID, float] = {}
+        results_map: dict[UUID, SearchResult] = {}
+
+        # 处理第一个列表
+        for rank, result in enumerate(list1):
+            node_id = result.node_id
+            rrf_score = weight1 * (1.0 / (k + rank + 1))
+            scores[node_id] = scores.get(node_id, 0) + rrf_score
+            if node_id not in results_map:
+                results_map[node_id] = result
+
+        # 处理第二个列表
+        for rank, result in enumerate(list2):
+            node_id = result.node_id
+            rrf_score = weight2 * (1.0 / (k + rank + 1))
+            scores[node_id] = scores.get(node_id, 0) + rrf_score
+            if node_id not in results_map:
+                results_map[node_id] = result
+
+        # 按 RRF 分数排序
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+
+        # 构建最终结果
+        merged_results = []
+        for node_id in sorted_ids[:top_k]:
+            result = results_map[node_id]
+            # 使用 RRF 分数作为最终 rank
+            merged_results.append(SearchResult(
+                node_id=result.node_id,
+                document_id=result.document_id,
+                title=result.title,
+                content=result.content,
+                rank=scores[node_id],
+            ))
+
+        return merged_results
 
     async def save_embeddings(
         self,
@@ -482,6 +674,7 @@ class SQLiteSearchRepository(SearchRepository):
         """构建 FTS5 查询字符串
 
         将用户输入转换为 FTS5 查询格式。
+        使用 OR 逻辑连接词语，提高召回率。
         """
         # 移除特殊字符，保留字母、数字、中文
         cleaned = re.sub(r"[^\w\u4e00-\u9fff\s]", " ", query)
@@ -493,8 +686,9 @@ class SQLiteSearchRepository(SearchRepository):
         if not words:
             return ""
 
-        # FTS5 使用 AND 连接（默认行为），用双引号包裹每个词
-        return " ".join(f'"{w}"' for w in words)
+        # 使用 OR 逻辑连接，提高召回率
+        # 对于问答场景，用户输入 "dbdiag 是什么" 应该能找到 dbdiag 相关内容
+        return " OR ".join(f'"{w}"' for w in words)
 
 
 class SQLiteRepositoryFactory(RepositoryFactory):

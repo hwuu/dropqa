@@ -440,8 +440,111 @@ class PostgresSearchRepository(SearchRepository):
         top_k: int = 10,
         fulltext_weight: float = 0.5,
     ) -> list[SearchResult]:
-        # TODO: 实现混合搜索
-        raise NotImplementedError("PostgreSQL 混合搜索尚未实现")
+        """混合搜索（全文 + 向量）
+
+        使用 RRF (Reciprocal Rank Fusion) 算法合并全文搜索和向量搜索结果。
+
+        Args:
+            query: 文本查询
+            embedding: 查询向量
+            top_k: 返回结果数量
+            fulltext_weight: 全文搜索权重 (0.0-1.0)
+
+        Returns:
+            搜索结果列表
+        """
+        vector_weight = 1.0 - fulltext_weight
+
+        # 获取更多候选结果用于合并
+        candidate_k = top_k * 2
+
+        # 执行全文搜索
+        fulltext_results = []
+        if fulltext_weight > 0:
+            fulltext_results = await self.fulltext_search(query, candidate_k)
+
+        # 执行向量搜索
+        vector_results = []
+        if vector_weight > 0 and embedding:
+            vector_results = await self.vector_search(embedding, candidate_k)
+
+        # 如果只有一种搜索有结果，直接返回
+        if not fulltext_results and not vector_results:
+            return []
+        if not fulltext_results:
+            return vector_results[:top_k]
+        if not vector_results:
+            return fulltext_results[:top_k]
+
+        # 使用 RRF 合并结果
+        return self._rrf_merge(
+            fulltext_results,
+            vector_results,
+            fulltext_weight,
+            vector_weight,
+            top_k,
+        )
+
+    def _rrf_merge(
+        self,
+        list1: list[SearchResult],
+        list2: list[SearchResult],
+        weight1: float,
+        weight2: float,
+        top_k: int,
+        k: int = 60,
+    ) -> list[SearchResult]:
+        """RRF (Reciprocal Rank Fusion) 合并两个排序列表
+
+        Args:
+            list1: 第一个搜索结果列表
+            list2: 第二个搜索结果列表
+            weight1: 第一个列表的权重
+            weight2: 第二个列表的权重
+            top_k: 返回结果数量
+            k: RRF 常数，用于平滑排名
+
+        Returns:
+            合并后的搜索结果列表
+        """
+        from uuid import UUID
+
+        # 计算 RRF 分数
+        scores: dict[UUID, float] = {}
+        results_map: dict[UUID, SearchResult] = {}
+
+        # 处理第一个列表
+        for rank, result in enumerate(list1):
+            node_id = result.node_id
+            rrf_score = weight1 * (1.0 / (k + rank + 1))
+            scores[node_id] = scores.get(node_id, 0) + rrf_score
+            if node_id not in results_map:
+                results_map[node_id] = result
+
+        # 处理第二个列表
+        for rank, result in enumerate(list2):
+            node_id = result.node_id
+            rrf_score = weight2 * (1.0 / (k + rank + 1))
+            scores[node_id] = scores.get(node_id, 0) + rrf_score
+            if node_id not in results_map:
+                results_map[node_id] = result
+
+        # 按 RRF 分数排序
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+
+        # 构建最终结果
+        merged_results = []
+        for node_id in sorted_ids[:top_k]:
+            result = results_map[node_id]
+            merged_results.append(SearchResult(
+                node_id=result.node_id,
+                document_id=result.document_id,
+                title=result.title,
+                content=result.content,
+                rank=scores[node_id],
+            ))
+
+        return merged_results
 
     async def save_embeddings(
         self,

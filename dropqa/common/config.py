@@ -128,6 +128,13 @@ class ServerAppConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    agentic: "AgenticConfig" = Field(default_factory=lambda: _get_agentic_config())
+
+
+def _get_agentic_config() -> "AgenticConfig":
+    """延迟导入 AgenticConfig 以避免循环依赖"""
+    from dropqa.server.agentic.config import AgenticConfig
+    return AgenticConfig()
 
 
 def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
@@ -194,3 +201,17 @@ def create_repository_factory(storage_config: StorageConfig) -> "RepositoryFacto
         return SQLiteRepositoryFactory(storage_config.sqlite)
     else:
         raise ValueError(f"不支持的存储后端: {storage_config.backend}")
+
+
+def _rebuild_server_config() -> None:
+    """重建 ServerAppConfig 模型以解析前向引用
+
+    在模块加载时自动调用，确保 ServerAppConfig 可直接使用。
+    """
+    from dropqa.server.agentic.config import AgenticConfig
+    ServerAppConfig.model_rebuild()
+
+
+# 模块加载时自动重建模型
+_rebuild_server_config()
+
