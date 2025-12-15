@@ -65,6 +65,45 @@ class WatchConfig(BaseModel):
         return [Path(d).expanduser().resolve() for d in self.directories]
 
 
+# ============== 规范化配置 ==============
+
+class ParagraphSplitConfig(BaseModel):
+    """长段落切分配置"""
+    enabled: bool = True
+    max_length: int = 800  # 超过此长度触发切分
+    target_size: int = 400  # 目标切分大小
+    use_semantic: bool = True  # 是否使用语义切分
+    similarity_threshold: float = 0.5  # 语义断点阈值
+
+
+class SectionSplitConfig(BaseModel):
+    """长 Section 拆分配置"""
+    enabled: bool = True
+    max_length: int = 3000  # 无子节点的 section 超过此长度触发拆分
+    min_subsections: int = 2  # 至少拆分为几个子 section
+    use_llm_title: bool = True  # 是否用 LLM 生成子 section 标题
+
+
+class TitleEnrichConfig(BaseModel):
+    """无意义标题增强配置"""
+    enabled: bool = True
+    patterns: list[str] = Field(default_factory=lambda: [
+        r"^[一二三四五六七八九十]+[、.]?\s*$",
+        r"^\d+[、.]\s*$",
+        r"^第[一二三四五六七八九十\d]+[章节部分]$",
+        r"^[A-Z][、.]\s*$",
+    ])
+    preserve_original: bool = True  # 保留原始编号
+
+
+class NormalizationConfig(BaseModel):
+    """文档规范化配置"""
+    enabled: bool = False  # 总开关，默认关闭
+    paragraph_split: ParagraphSplitConfig = Field(default_factory=ParagraphSplitConfig)
+    section_split: SectionSplitConfig = Field(default_factory=SectionSplitConfig)
+    title_enrich: TitleEnrichConfig = Field(default_factory=TitleEnrichConfig)
+
+
 class LLMConfig(BaseModel):
     """LLM 配置"""
     api_base: str = "http://localhost:11434/v1"
@@ -116,6 +155,7 @@ class IndexerConfig(BaseModel):
     watch: WatchConfig = Field(default_factory=WatchConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
 
 
 class ServerAppConfig(BaseModel):

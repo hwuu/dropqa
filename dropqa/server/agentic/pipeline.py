@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, Optional
 
 from dropqa.server.agentic.config import AgenticConfig
 from dropqa.server.agentic.query_rewriter import QueryRewriter, RewrittenQuery
@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     from dropqa.common.embedding import EmbeddingService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineProgress:
+    """Pipeline 进度事件"""
+    stage: str  # 当前阶段: query_rewrite, search, rerank, complete
+    message: str  # 进度消息
+    result: Optional[AgenticRAGResult] = None  # 完成时的结果
 
 
 @dataclass
@@ -66,6 +74,22 @@ class AgenticRAGPipeline:
         Returns:
             AgenticRAGResult 结果
         """
+        # 使用流式方法，但只返回最终结果
+        result = None
+        async for progress in self.run_stream(question):
+            if progress.stage == "complete" and progress.result:
+                result = progress.result
+        return result
+
+    async def run_stream(self, question: str) -> AsyncGenerator[PipelineProgress, None]:
+        """流式执行 Agentic RAG 流程，实时返回进度
+
+        Args:
+            question: 用户问题
+
+        Yields:
+            PipelineProgress 进度事件
+        """
         logger.info(f"[AgenticRAG] 开始处理问题: {question[:50]}...")
 
         # 1. 查询改写
@@ -74,26 +98,36 @@ class AgenticRAGPipeline:
         embedding_query = question
 
         if self._query_rewriter and self._config.query_rewrite.enabled:
+            yield PipelineProgress(stage="query_rewrite", message="正在分析问题...")
             logger.debug("[AgenticRAG] 执行查询改写")
             rewritten_query = await self._query_rewriter.rewrite(question)
             search_query = rewritten_query.fulltext_query
             embedding_query = rewritten_query.semantic_query
             logger.debug(f"[AgenticRAG] 改写结果: fulltext='{search_query}', semantic='{embedding_query}'")
+            yield PipelineProgress(
+                stage="query_rewrite",
+                message=f"提取关键词: {', '.join(rewritten_query.keywords[:3])}..."
+            )
 
         # 2. 执行搜索
+        yield PipelineProgress(stage="search", message="正在搜索文档...")
         contexts = await self._execute_search(search_query, embedding_query)
         logger.debug(f"[AgenticRAG] 搜索返回 {len(contexts)} 条结果")
+        yield PipelineProgress(stage="search", message=f"找到 {len(contexts)} 条相关内容")
 
         # 3. 多轮检索（如果启用且结果不足）
         if self._config.multi_round.enabled and len(contexts) < self._config.top_k // 2:
+            yield PipelineProgress(stage="search", message="结果较少，正在补充检索...")
             logger.debug("[AgenticRAG] 结果不足，执行补充检索")
             additional_contexts = await self._supplementary_search(question, contexts)
             contexts = self._merge_contexts(contexts, additional_contexts)
             logger.debug(f"[AgenticRAG] 补充后共 {len(contexts)} 条结果")
+            yield PipelineProgress(stage="search", message=f"补充检索后共 {len(contexts)} 条结果")
 
         # 4. 结果重排序
         ranked_results = []
         if self._reranker and self._config.rerank.enabled and contexts:
+            yield PipelineProgress(stage="rerank", message="正在筛选最相关结果...")
             logger.debug("[AgenticRAG] 执行结果重排序")
             ranked_results = await self._reranker.rerank(
                 question,
@@ -101,6 +135,10 @@ class AgenticRAGPipeline:
                 top_k=self._config.rerank.top_k,
             )
             logger.debug(f"[AgenticRAG] 重排序后返回 {len(ranked_results)} 条结果")
+            yield PipelineProgress(
+                stage="rerank",
+                message=f"筛选出 {len(ranked_results)} 条最相关结果"
+            )
         else:
             # 不重排序，直接转换
             ranked_results = [
@@ -108,12 +146,14 @@ class AgenticRAGPipeline:
                 for i, ctx in enumerate(contexts[:self._config.top_k])
             ]
 
-        return AgenticRAGResult(
+        result = AgenticRAGResult(
             question=question,
             rewritten_query=rewritten_query,
             contexts=contexts,
             ranked_results=ranked_results,
         )
+
+        yield PipelineProgress(stage="complete", message="检索完成", result=result)
 
     async def _execute_search(
         self,

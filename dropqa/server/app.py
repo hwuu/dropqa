@@ -1,11 +1,12 @@
 """FastAPI 应用"""
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -17,6 +18,8 @@ from dropqa.server.search import SearchService
 
 # 静态文件目录
 STATIC_DIR = Path(__file__).parent / "static"
+# Vue 构建产物目录
+DIST_DIR = STATIC_DIR / "dist"
 
 
 # 请求/响应模型
@@ -32,10 +35,19 @@ class SourceResponse(BaseModel):
     content_snippet: str
 
 
+class ReasoningStepResponse(BaseModel):
+    """推理步骤响应"""
+    step: str
+    action: str
+    result: str = ""
+
+
 class AskResponse(BaseModel):
     """问答响应"""
     answer: str
     sources: list[SourceResponse]
+    mode: str = "simple"
+    reasoning_trace: list[ReasoningStepResponse] | None = None
 
 
 def create_app(config: ServerAppConfig) -> FastAPI:
@@ -98,6 +110,10 @@ def create_app(config: ServerAppConfig) -> FastAPI:
     # 注册错误处理
     _register_error_handlers(app)
 
+    # 挂载静态文件（Vue 构建产物）
+    if DIST_DIR.exists():
+        app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
+
     return app
 
 
@@ -111,7 +127,13 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/")
     async def index():
-        """首页"""
+        """首页
+
+        优先返回 Vue 构建产物，如果不存在则返回旧版页面。
+        """
+        vue_index = DIST_DIR / "index.html"
+        if vue_index.exists():
+            return FileResponse(vue_index)
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.post("/api/qa/ask", response_model=AskResponse)
@@ -123,6 +145,18 @@ def _register_routes(app: FastAPI) -> None:
         qa_service: QAService = request.app.state.qa_service
         response = await qa_service.ask(body.question)
 
+        # 构建推理步骤响应
+        reasoning_trace = None
+        if response.reasoning_trace:
+            reasoning_trace = [
+                ReasoningStepResponse(
+                    step=step.step,
+                    action=step.action,
+                    result=step.result,
+                )
+                for step in response.reasoning_trace
+            ]
+
         return AskResponse(
             answer=response.answer,
             sources=[
@@ -133,6 +167,59 @@ def _register_routes(app: FastAPI) -> None:
                 )
                 for s in response.sources
             ],
+            mode=response.mode,
+            reasoning_trace=reasoning_trace,
+        )
+
+    @app.post("/api/qa/ask/stream")
+    async def qa_ask_stream(request: Request, body: AskRequest):
+        """流式问答接口 (SSE)
+
+        实时返回进度事件，最后返回完整结果。
+        """
+        qa_service: QAService = request.app.state.qa_service
+
+        async def event_generator() -> AsyncGenerator[str, None]:
+            async for event in qa_service.ask_stream(body.question):
+                if event.event == "progress":
+                    # 进度事件
+                    data = {"message": event.message}
+                    yield f"event: progress\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                elif event.event == "complete":
+                    # 完成事件，包含完整响应
+                    response = event.data
+                    reasoning_trace = None
+                    if response.reasoning_trace:
+                        reasoning_trace = [
+                            {
+                                "step": step.step,
+                                "action": step.action,
+                                "result": step.result,
+                            }
+                            for step in response.reasoning_trace
+                        ]
+                    data = {
+                        "answer": response.answer,
+                        "sources": [
+                            {
+                                "document_name": s.document_name,
+                                "path": s.path,
+                                "content_snippet": s.content_snippet,
+                            }
+                            for s in response.sources
+                        ],
+                        "mode": response.mode,
+                        "reasoning_trace": reasoning_trace,
+                    }
+                    yield f"event: complete\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
         )
 
 

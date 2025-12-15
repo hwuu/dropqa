@@ -14,7 +14,7 @@ from dropqa.server.agentic.config import (
     QueryRewriteConfig,
     RerankConfig,
 )
-from dropqa.server.agentic.pipeline import AgenticRAGPipeline, AgenticRAGResult
+from dropqa.server.agentic.pipeline import AgenticRAGPipeline, AgenticRAGResult, PipelineProgress
 from dropqa.server.agentic.query_rewriter import QueryRewriter, RewrittenQuery
 from dropqa.server.agentic.reranker import Reranker, RankedResult
 
@@ -30,4 +30,5 @@ __all__ = [
     "RankedResult",
     "AgenticRAGPipeline",
     "AgenticRAGResult",
+    "PipelineProgress",
 ]

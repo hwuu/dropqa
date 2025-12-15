@@ -16,7 +16,7 @@ from dropqa.server.app import create_app
 
 # 配置日志
 logging.basicConfig(
-    level=logging.DEBUG,  # 改为 DEBUG 级别以显示 RAG 流程日志
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )

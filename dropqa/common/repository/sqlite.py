@@ -256,12 +256,82 @@ class SQLiteNodeRepository(NodeRepository):
             if target_node is None:
                 return None
 
+            # 获取节点内容，如果为空则聚合子节点内容
+            content = target_node["content"]
+            if not content:
+                content = await self._get_children_content(db, node_id)
+
             return NodeWithAncestors(
                 node_id=node_id,
-                content=target_node["content"],
+                content=content,
                 ancestors=ancestors,
                 document_name=document_name,
             )
+
+    async def _get_children_content(
+        self,
+        db: aiosqlite.Connection,
+        parent_id: UUID,
+        max_depth: int = 3,
+    ) -> str:
+        """递归获取所有子节点的内容并聚合
+
+        Args:
+            db: 数据库连接
+            parent_id: 父节点 ID
+            max_depth: 最大递归深度
+
+        Returns:
+            聚合后的子节点内容
+        """
+        # 使用递归 CTE 获取所有子节点，按 position 排序
+        sql = """
+            WITH RECURSIVE descendants AS (
+                SELECT
+                    n.id,
+                    n.parent_id,
+                    n.title,
+                    n.content,
+                    n.position,
+                    n.depth,
+                    1 AS level
+                FROM nodes n
+                WHERE n.parent_id = ?
+
+                UNION ALL
+
+                SELECT
+                    c.id,
+                    c.parent_id,
+                    c.title,
+                    c.content,
+                    c.position,
+                    c.depth,
+                    d.level + 1
+                FROM nodes c
+                INNER JOIN descendants d ON c.parent_id = d.id
+                WHERE d.level < ?
+            )
+            SELECT title, content, depth, position
+            FROM descendants
+            ORDER BY depth, position
+        """
+
+        async with db.execute(sql, (str(parent_id), max_depth)) as cursor:
+            rows = await cursor.fetchall()
+
+        if not rows:
+            return ""
+
+        # 聚合子节点内容
+        parts = []
+        for row in rows:
+            if row[1]:  # content
+                parts.append(row[1])
+            elif row[0]:  # title (如果没有 content 但有 title)
+                parts.append(row[0])
+
+        return "\n\n".join(parts)
 
 
 class SQLiteSearchRepository(SearchRepository):

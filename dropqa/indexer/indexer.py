@@ -4,7 +4,7 @@ import hashlib
 import logging
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dropqa.common.repository.base import (
     DocumentData,
@@ -14,6 +14,9 @@ from dropqa.common.repository.base import (
     SearchRepository,
 )
 from dropqa.indexer.parser import flatten_nodes, parse_document
+
+if TYPE_CHECKING:
+    from dropqa.indexer.normalizer import DocumentNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,7 @@ class Indexer:
         node_repo: NodeRepository,
         search_repo: Optional[SearchRepository] = None,
         embedding_service: Optional["EmbeddingService"] = None,
+        normalizer: Optional["DocumentNormalizer"] = None,
     ):
         """初始化 Indexer
 
@@ -56,11 +60,13 @@ class Indexer:
             node_repo: 节点仓库
             search_repo: 可选的搜索仓库，用于保存向量
             embedding_service: 可选的 Embedding 服务，用于生成向量
+            normalizer: 可选的文档规范化器
         """
         self._doc_repo = doc_repo
         self._node_repo = node_repo
         self._search_repo = search_repo
         self._embedding_service = embedding_service
+        self._normalizer = normalizer
 
     async def index_file(self, file_path: Path) -> DocumentData:
         """索引单个文件
@@ -112,8 +118,15 @@ class Indexer:
             )
             await self._doc_repo.save(document)
 
-        # 解析文件并创建节点
+        # 解析文件
         parsed_root = parse_document(file_path)
+
+        # 规范化（如果启用）
+        if self._normalizer:
+            logger.debug(f"应用文档规范化: {file_path.name}")
+            parsed_root = await self._normalizer.normalize(parsed_root)
+
+        # 创建节点
         nodes_data_dicts = flatten_nodes(parsed_root, document.id, version=1)
 
         # 转换为 NodeData 对象

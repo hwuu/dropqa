@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 from dropqa.common.embedding import EmbeddingService
 from dropqa.server.agentic.config import AgenticConfig
@@ -22,10 +22,28 @@ class SourceReference:
 
 
 @dataclass
+class ReasoningStep:
+    """推理步骤"""
+    step: str
+    action: str
+    result: str = ""
+
+
+@dataclass
 class QAResponse:
     """问答响应"""
     answer: str
     sources: list[SourceReference]
+    mode: str = "simple"  # 'simple' or 'agentic'
+    reasoning_trace: list[ReasoningStep] | None = None
+
+
+@dataclass
+class ProgressEvent:
+    """进度事件"""
+    event: str  # 'progress' or 'complete'
+    message: str = ""
+    data: Optional[QAResponse] = None
 
 
 # RAG Prompt 模板
@@ -123,6 +141,178 @@ class QAService:
         else:
             return await self._ask_simple(question)
 
+    async def ask_stream(self, question: str) -> AsyncGenerator[ProgressEvent, None]:
+        """流式问答，实时返回进度
+
+        Args:
+            question: 用户问题
+
+        Yields:
+            进度事件
+        """
+        question = question.strip()
+        if not question:
+            yield ProgressEvent(
+                event="complete",
+                data=QAResponse(answer="请输入您的问题。", sources=[]),
+            )
+            return
+
+        # 根据配置选择 RAG 模式
+        if self._agentic_pipeline:
+            async for event in self._ask_agentic_stream(question):
+                yield event
+        else:
+            async for event in self._ask_simple_stream(question):
+                yield event
+
+    async def _ask_agentic_stream(self, question: str) -> AsyncGenerator[ProgressEvent, None]:
+        """Agentic RAG 流式问答"""
+        reasoning_trace = []
+        result = None
+
+        # 使用流式 pipeline，实时返回进度
+        async for progress in self._agentic_pipeline.run_stream(question):
+            if progress.stage == "query_rewrite":
+                yield ProgressEvent(event="progress", message=progress.message)
+            elif progress.stage == "search":
+                yield ProgressEvent(event="progress", message=progress.message)
+            elif progress.stage == "rerank":
+                yield ProgressEvent(event="progress", message=progress.message)
+            elif progress.stage == "complete":
+                result = progress.result
+
+        # 检查是否有结果
+        if result is None:
+            yield ProgressEvent(
+                event="complete",
+                data=QAResponse(answer="处理过程中出现错误", sources=[], mode="agentic"),
+            )
+            return
+
+        # 构建推理过程
+        if result.rewritten_query:
+            rq = result.rewritten_query
+            reasoning_trace.append(ReasoningStep(
+                step="查询改写",
+                action=f"原始问题: {question}",
+                result=f"关键词: {', '.join(rq.keywords)} | 全文查询: {rq.fulltext_query}",
+            ))
+
+        if result.contexts:
+            reasoning_trace.append(ReasoningStep(
+                step="文档检索",
+                action="混合搜索（全文 + 向量）",
+                result=f"找到 {len(result.contexts)} 条相关内容",
+            ))
+
+        if result.ranked_results:
+            reasoning_trace.append(ReasoningStep(
+                step="结果重排序",
+                action="基于相关性重新排序",
+                result=f"保留前 {len(result.ranked_results)} 条最相关结果",
+            ))
+
+        # 检查是否有搜索结果
+        if not result.ranked_results:
+            answer = await self.llm_service.chat([
+                {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
+            ])
+            yield ProgressEvent(
+                event="complete",
+                data=QAResponse(
+                    answer=answer,
+                    sources=[],
+                    mode="agentic",
+                    reasoning_trace=reasoning_trace,
+                ),
+            )
+            return
+
+        # 生成回答
+        yield ProgressEvent(event="progress", message="正在生成回答...")
+
+        contexts = [r.context for r in result.ranked_results]
+        prompt = self._build_context_prompt(contexts, question)
+        answer = await self.llm_service.chat([
+            {"role": "user", "content": prompt}
+        ])
+
+        reasoning_trace.append(ReasoningStep(
+            step="答案生成",
+            action="基于检索内容生成回答",
+            result=f"生成 {len(answer)} 字符的回答",
+        ))
+
+        sources = self._build_sources(contexts)
+
+        yield ProgressEvent(
+            event="complete",
+            data=QAResponse(
+                answer=answer,
+                sources=sources,
+                mode="agentic",
+                reasoning_trace=reasoning_trace,
+            ),
+        )
+
+    async def _ask_simple_stream(self, question: str) -> AsyncGenerator[ProgressEvent, None]:
+        """简单 RAG 流式问答"""
+        # 1. 搜索
+        yield ProgressEvent(event="progress", message="正在搜索文档...")
+
+        search_results = await self.search_service.fulltext_search(
+            question,
+            top_k=self.top_k,
+        )
+
+        if not search_results:
+            answer = await self.llm_service.chat([
+                {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
+            ])
+            yield ProgressEvent(
+                event="complete",
+                data=QAResponse(answer=answer, sources=[], mode="simple"),
+            )
+            return
+
+        yield ProgressEvent(
+            event="progress",
+            message=f"找到 {len(search_results)} 条相关内容"
+        )
+
+        # 2. 获取上下文
+        contexts: list[NodeContext] = []
+        for result in search_results:
+            context = await self.search_service.get_node_context(result.node_id)
+            if context:
+                contexts.append(context)
+
+        if not contexts:
+            answer = await self.llm_service.chat([
+                {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
+            ])
+            yield ProgressEvent(
+                event="complete",
+                data=QAResponse(answer=answer, sources=[], mode="simple"),
+            )
+            return
+
+        # 3. 生成回答
+        yield ProgressEvent(event="progress", message="正在生成回答...")
+
+        prompt = self._build_context_prompt(contexts, question)
+        answer = await self.llm_service.chat([
+            {"role": "user", "content": prompt}
+        ])
+
+        sources = self._build_sources(contexts)
+
+        yield ProgressEvent(
+            event="complete",
+            data=QAResponse(answer=answer, sources=sources, mode="simple"),
+        )
+
     async def _ask_agentic(self, question: str) -> QAResponse:
         """Agentic RAG 问答
 
@@ -133,13 +323,46 @@ class QAService:
         # 执行 Agentic Pipeline
         result = await self._agentic_pipeline.run(question)
 
+        # 构建推理过程
+        reasoning_trace = []
+
+        # 添加查询改写步骤
+        if result.rewritten_query:
+            rq = result.rewritten_query
+            reasoning_trace.append(ReasoningStep(
+                step="查询改写",
+                action=f"原始问题: {question}",
+                result=f"关键词: {', '.join(rq.keywords)} | 全文查询: {rq.fulltext_query}",
+            ))
+
+        # 添加搜索步骤
+        if result.contexts:
+            reasoning_trace.append(ReasoningStep(
+                step="文档检索",
+                action="混合搜索（全文 + 向量）",
+                result=f"找到 {len(result.contexts)} 条相关内容",
+            ))
+
+        # 添加重排序步骤
+        if result.ranked_results:
+            reasoning_trace.append(ReasoningStep(
+                step="结果重排序",
+                action="基于相关性重新排序",
+                result=f"保留前 {len(result.ranked_results)} 条最相关结果",
+            ))
+
         # 检查是否有结果
         if not result.ranked_results:
             logger.debug("[AgenticRAG] 无搜索结果，返回默认回答")
             answer = await self.llm_service.chat([
                 {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
             ])
-            return QAResponse(answer=answer, sources=[])
+            return QAResponse(
+                answer=answer,
+                sources=[],
+                mode="agentic",
+                reasoning_trace=reasoning_trace,
+            )
 
         # 使用重排序后的上下文
         contexts = [r.context for r in result.ranked_results]
@@ -160,10 +383,22 @@ class QAService:
             {"role": "user", "content": prompt}
         ])
 
+        # 添加生成步骤
+        reasoning_trace.append(ReasoningStep(
+            step="答案生成",
+            action="基于检索内容生成回答",
+            result=f"生成 {len(answer)} 字符的回答",
+        ))
+
         # 构建来源引用
         sources = self._build_sources(contexts)
 
-        return QAResponse(answer=answer, sources=sources)
+        return QAResponse(
+            answer=answer,
+            sources=sources,
+            mode="agentic",
+            reasoning_trace=reasoning_trace,
+        )
 
     async def _ask_simple(self, question: str) -> QAResponse:
         """简单 RAG 问答
@@ -186,7 +421,7 @@ class QAService:
             answer = await self.llm_service.chat([
                 {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
             ])
-            return QAResponse(answer=answer, sources=[])
+            return QAResponse(answer=answer, sources=[], mode="simple")
 
         # 打印搜索结果详情
         for i, result in enumerate(search_results, 1):
@@ -214,7 +449,7 @@ class QAService:
             answer = await self.llm_service.chat([
                 {"role": "user", "content": NO_CONTEXT_PROMPT.format(question=question)}
             ])
-            return QAResponse(answer=answer, sources=[])
+            return QAResponse(answer=answer, sources=[], mode="simple")
 
         # 3. 构建 Prompt
         logger.debug("[RAG] 步骤3: 构建 Prompt")
@@ -232,7 +467,7 @@ class QAService:
         sources = self._build_sources(contexts)
         logger.debug(f"[RAG] 步骤5: 构建来源引用, 数量={len(sources)}")
 
-        return QAResponse(answer=answer, sources=sources)
+        return QAResponse(answer=answer, sources=sources, mode="simple")
 
     def _build_context_prompt(
         self,
