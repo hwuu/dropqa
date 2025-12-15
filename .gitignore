@@ -212,3 +212,4 @@ nul
 data/
 indexer.yaml
 server.yaml
+node_modules/
